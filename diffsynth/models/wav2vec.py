@@ -47,6 +47,7 @@ class WanS2VAudioEncoder(torch.nn.Module):
     def __init__(self):
         super().__init__()
         from transformers import Wav2Vec2ForCTC, Wav2Vec2Config
+        from transformers.initialization import no_init_weights
         config = {
             "_name_or_path": "facebook/wav2vec2-large-xlsr-53",
             "activation_dropout": 0.05,
@@ -96,7 +97,8 @@ class WanS2VAudioEncoder(torch.nn.Module):
             "transformers_version": "4.7.0.dev0",
             "vocab_size": 33
         }
-        self.model = Wav2Vec2ForCTC(Wav2Vec2Config(**config))
+        with no_init_weights():
+            self.model = Wav2Vec2ForCTC(Wav2Vec2Config(**config))
         self.video_rate = 30
 
     def extract_audio_feat(self, input_audio, sample_rate, processor, return_all_layers=False, dtype=torch.float32, device='cpu'):
