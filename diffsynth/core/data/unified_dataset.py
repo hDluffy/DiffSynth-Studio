@@ -26,6 +26,19 @@ class UnifiedDataset(torch.utils.data.Dataset):
         self.load_metadata(metadata_path)
     
     @staticmethod
+    def is_missing_file_value(value):
+        if value is None:
+            return True
+        if isinstance(value, str):
+            return value == ""
+        if isinstance(value, (list, tuple, dict)):
+            return False
+        try:
+            return bool(pandas.isna(value))
+        except (TypeError, ValueError):
+            return False
+
+    @staticmethod
     def default_image_operator(
         base_path="",
         max_pixels=1920*1080, height=None, width=None,
@@ -94,7 +107,9 @@ class UnifiedDataset(torch.utils.data.Dataset):
             data = self.data[data_id % len(self.data)].copy()
             for key in self.data_file_keys:
                 if key in data:
-                    if key in self.special_operator_map:
+                    if self.is_missing_file_value(data[key]):
+                        data[key] = None
+                    elif key in self.special_operator_map:
                         data[key] = self.special_operator_map[key](data[key])
                     elif key in self.data_file_keys:
                         data[key] = self.main_data_operator(data[key])

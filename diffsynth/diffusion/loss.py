@@ -1,5 +1,30 @@
 from .base_pipeline import BasePipeline
 import torch
+import torch.nn.functional as F
+
+
+def _merge_loss_inputs(inputs):
+    if isinstance(inputs, (list, tuple)):
+        inputs_shared, inputs_posi = inputs[0], inputs[1]
+        return {**inputs_shared, **inputs_posi}
+    return dict(inputs)
+
+
+def _per_sample_mse(pred, target):
+    loss = (pred.float() - target.float()).pow(2)
+    return loss.flatten(1).mean(dim=1)
+
+
+def _as_loss_tensor(value, like):
+    if value is None:
+        return None
+    if not torch.is_tensor(value):
+        value = torch.as_tensor(value, dtype=torch.float32, device=like.device)
+    else:
+        value = value.to(dtype=torch.float32, device=like.device)
+    if value.numel() == 1:
+        value = value.reshape(1).expand_as(like)
+    return value.reshape_as(like).detach()
 
 
 def FlowMatchSFTLoss(pipe: BasePipeline, **inputs):
@@ -31,6 +56,82 @@ def FlowMatchSFTLoss(pipe: BasePipeline, **inputs):
     loss = torch.nn.functional.mse_loss(noise_pred.float(), training_target.float())
     loss = loss * pipe.scheduler.training_weight(timestep)
     return loss
+
+
+def FlowMatchDPOLoss(
+    pipe: BasePipeline,
+    chosen_inputs,
+    rejected_inputs,
+    beta=0.1,
+    lambda_sft=0.1,
+    reference_free=True,
+    ref_chosen_loss=None,
+    ref_rejected_loss=None,
+    dpo_weight=None,
+):
+    chosen_inputs = _merge_loss_inputs(chosen_inputs)
+    rejected_inputs = _merge_loss_inputs(rejected_inputs)
+
+    chosen_latents = chosen_inputs["input_latents"]
+    rejected_latents = rejected_inputs["input_latents"]
+    if chosen_latents.shape != rejected_latents.shape:
+        raise ValueError(
+            "DPO requires chosen and rejected input_latents to have the same shape, "
+            f"got {tuple(chosen_latents.shape)} and {tuple(rejected_latents.shape)}."
+        )
+
+    max_timestep_boundary = int(chosen_inputs.get("max_timestep_boundary", 1) * len(pipe.scheduler.timesteps))
+    min_timestep_boundary = int(chosen_inputs.get("min_timestep_boundary", 0) * len(pipe.scheduler.timesteps))
+    if max_timestep_boundary <= min_timestep_boundary:
+        raise ValueError(
+            "Invalid timestep boundary for DPO: "
+            f"min={min_timestep_boundary}, max={max_timestep_boundary}."
+        )
+    timestep_id = torch.randint(min_timestep_boundary, max_timestep_boundary, (1,))
+    timestep = pipe.scheduler.timesteps[timestep_id].to(dtype=pipe.torch_dtype, device=pipe.device)
+
+    noise = torch.randn_like(chosen_latents) * chosen_inputs.get("noise_scale", 1.0)
+    chosen_inputs["latents"] = pipe.scheduler.add_noise(chosen_latents, noise, timestep)
+    rejected_inputs["latents"] = pipe.scheduler.add_noise(rejected_latents, noise, timestep)
+    chosen_target = pipe.scheduler.training_target(chosen_latents, noise, timestep)
+    rejected_target = pipe.scheduler.training_target(rejected_latents, noise, timestep)
+
+    if "first_frame_latents" in chosen_inputs:
+        chosen_inputs["latents"][:, :, 0:1] = chosen_inputs["first_frame_latents"]
+    if "first_frame_latents" in rejected_inputs:
+        rejected_inputs["latents"][:, :, 0:1] = rejected_inputs["first_frame_latents"]
+
+    models = {name: getattr(pipe, name) for name in pipe.in_iteration_models}
+    chosen_pred = pipe.model_fn(**models, **chosen_inputs, timestep=timestep)
+    rejected_pred = pipe.model_fn(**models, **rejected_inputs, timestep=timestep)
+
+    if "first_frame_latents" in chosen_inputs:
+        chosen_pred = chosen_pred[:, :, 1:]
+        chosen_target = chosen_target[:, :, 1:]
+    if "first_frame_latents" in rejected_inputs:
+        rejected_pred = rejected_pred[:, :, 1:]
+        rejected_target = rejected_target[:, :, 1:]
+
+    training_weight = pipe.scheduler.training_weight(timestep)
+    chosen_loss = _per_sample_mse(chosen_pred, chosen_target) * training_weight
+    rejected_loss = _per_sample_mse(rejected_pred, rejected_target) * training_weight
+    delta_theta = -chosen_loss + rejected_loss
+
+    if reference_free:
+        dpo_logits = beta * delta_theta
+    else:
+        ref_chosen_loss = _as_loss_tensor(ref_chosen_loss, chosen_loss)
+        ref_rejected_loss = _as_loss_tensor(ref_rejected_loss, rejected_loss)
+        if ref_chosen_loss is None or ref_rejected_loss is None:
+            raise ValueError("Reference DPO requires ref_chosen_loss and ref_rejected_loss.")
+        delta_ref = -ref_chosen_loss + ref_rejected_loss
+        dpo_logits = beta * (delta_theta - delta_ref)
+
+    dpo_loss = -F.logsigmoid(dpo_logits)
+    dpo_weight = _as_loss_tensor(dpo_weight, dpo_loss)
+    if dpo_weight is not None:
+        dpo_loss = dpo_loss * dpo_weight
+    return dpo_loss.mean() + lambda_sft * chosen_loss.mean()
 
 
 def FlowMatchSFTAudioVideoLoss(pipe: BasePipeline, **inputs):

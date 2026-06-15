@@ -24,6 +24,11 @@ class WanTrainingModule(DiffusionTrainingModule):
         task="sft",
         max_timestep_boundary=1.0,
         min_timestep_boundary=0.0,
+        dpo_beta=0.1,
+        dpo_lambda_sft=0.1,
+        dpo_reference_free=True,
+        dpo_ref_loss_key_chosen="ref_loss_chosen",
+        dpo_ref_loss_key_rejected="ref_loss_rejected",
     ):
         super().__init__()
         # Warning
@@ -53,6 +58,12 @@ class WanTrainingModule(DiffusionTrainingModule):
         self.extra_inputs = extra_inputs.split(",") if extra_inputs is not None else []
         self.fp8_models = fp8_models
         self.task = task
+        self.dpo_beta = dpo_beta
+        self.dpo_lambda_sft = dpo_lambda_sft
+        self.dpo_reference_free = dpo_reference_free
+        self.dpo_ref_loss_key_chosen = dpo_ref_loss_key_chosen
+        self.dpo_ref_loss_key_rejected = dpo_ref_loss_key_rejected
+        self._warned_dpo_missing_input_image = False
         self.task_to_loss = {
             "sft:data_process": lambda pipe, *args: args,
             "direct_distill:data_process": lambda pipe, *args: args,
@@ -64,10 +75,30 @@ class WanTrainingModule(DiffusionTrainingModule):
         self.max_timestep_boundary = max_timestep_boundary
         self.min_timestep_boundary = min_timestep_boundary
         
+    @staticmethod
+    def has_data_value(value):
+        if value is None:
+            return False
+        if isinstance(value, str):
+            return value != ""
+        if isinstance(value, (list, tuple)):
+            return len(value) > 0
+        try:
+            return not bool(torch.isnan(torch.as_tensor(value)).item())
+        except (TypeError, ValueError, RuntimeError):
+            return True
+
+    @staticmethod
+    def first_item(value):
+        if isinstance(value, (list, tuple)):
+            return value[0] if len(value) > 0 else None
+        return value
+
     def parse_extra_inputs(self, data, extra_inputs, inputs_shared):
         for extra_input in extra_inputs:
             if extra_input == "input_image":
-                inputs_shared["input_image"] = data["video"][0]
+                input_image = data.get("input_image", None)
+                inputs_shared["input_image"] = self.first_item(input_image) if self.has_data_value(input_image) else data["video"][0]
             elif extra_input == "end_image":
                 inputs_shared["end_image"] = data["video"][-1]
             elif extra_input == "reference_image" or extra_input == "vace_reference_image":
@@ -104,7 +135,99 @@ class WanTrainingModule(DiffusionTrainingModule):
         inputs_shared = self.parse_extra_inputs(data, self.extra_inputs, inputs_shared)
         return inputs_shared, inputs_posi, inputs_nega
     
+    def get_required_dpo_value(self, data, key):
+        value = data.get(key, None)
+        if not self.has_data_value(value):
+            raise ValueError(f"DPO task requires `{key}` in each metadata item.")
+        return value
+
+    def validate_dpo_pair(self, chosen_video, rejected_video):
+        if len(chosen_video) != len(rejected_video):
+            raise ValueError(
+                "DPO requires chosen_video and rejected_video to have the same frame count, "
+                f"got {len(chosen_video)} and {len(rejected_video)}."
+            )
+        for frame_id, (chosen_frame, rejected_frame) in enumerate(zip(chosen_video, rejected_video)):
+            if chosen_frame.size != rejected_frame.size:
+                raise ValueError(
+                    "DPO requires chosen_video and rejected_video frames to share the same size, "
+                    f"but frame {frame_id} has {chosen_frame.size} and {rejected_frame.size}."
+                )
+
+    def get_dpo_pipeline_inputs(self, data):
+        chosen_video = self.get_required_dpo_value(data, "chosen_video")
+        rejected_video = self.get_required_dpo_value(data, "rejected_video")
+        self.validate_dpo_pair(chosen_video, rejected_video)
+
+        input_image = data.get("input_image", None)
+        if self.has_data_value(input_image):
+            input_image = self.first_item(input_image)
+        else:
+            input_image = chosen_video[0]
+            if not self._warned_dpo_missing_input_image:
+                warnings.warn("DPO input_image is missing. The chosen first frame will be used as the shared reference image.")
+                self._warned_dpo_missing_input_image = True
+
+        chosen_data = data.copy()
+        rejected_data = data.copy()
+        chosen_data["video"] = chosen_video
+        rejected_data["video"] = rejected_video
+        chosen_data["input_image"] = input_image
+        rejected_data["input_image"] = input_image
+
+        dpo_inputs = {
+            "chosen": self.get_pipeline_inputs(chosen_data),
+            "rejected": self.get_pipeline_inputs(rejected_data),
+        }
+        if self.has_data_value(data.get(self.dpo_ref_loss_key_chosen, None)):
+            dpo_inputs["ref_chosen_loss"] = data[self.dpo_ref_loss_key_chosen]
+        if self.has_data_value(data.get(self.dpo_ref_loss_key_rejected, None)):
+            dpo_inputs["ref_rejected_loss"] = data[self.dpo_ref_loss_key_rejected]
+        if self.has_data_value(data.get("dpo_weight", None)):
+            dpo_inputs["dpo_weight"] = data["dpo_weight"]
+        elif self.has_data_value(data.get("preference_score_gap", None)):
+            dpo_inputs["dpo_weight"] = data["preference_score_gap"]
+        if self.has_data_value(data.get("pair_id", None)):
+            dpo_inputs["pair_id"] = data["pair_id"]
+        return dpo_inputs
+
+    def normalize_dpo_inputs(self, inputs):
+        if isinstance(inputs, (list, tuple)) and len(inputs) == 2:
+            return {"chosen": inputs[0], "rejected": inputs[1]}
+        if not isinstance(inputs, dict) or "chosen" not in inputs or "rejected" not in inputs:
+            raise ValueError("DPO inputs must contain `chosen` and `rejected` entries.")
+        return inputs
+
+    def run_pipeline_units(self, inputs):
+        inputs = self.transfer_data_to_device(inputs, self.pipe.device, self.pipe.torch_dtype)
+        for unit in self.pipe.units:
+            inputs = self.pipe.unit_runner(unit, self.pipe, *inputs)
+        return inputs
+
+    def forward_dpo(self, data, inputs=None):
+        dpo_inputs = self.get_dpo_pipeline_inputs(data) if inputs is None else self.normalize_dpo_inputs(inputs)
+        dpo_inputs = self.transfer_data_to_device(dpo_inputs, self.pipe.device, self.pipe.torch_dtype)
+        dpo_inputs["chosen"] = self.run_pipeline_units(dpo_inputs["chosen"])
+        dpo_inputs["rejected"] = self.run_pipeline_units(dpo_inputs["rejected"])
+
+        if self.task.endswith(":data_process"):
+            return dpo_inputs
+
+        return FlowMatchDPOLoss(
+            self.pipe,
+            dpo_inputs["chosen"],
+            dpo_inputs["rejected"],
+            beta=self.dpo_beta,
+            lambda_sft=self.dpo_lambda_sft,
+            reference_free=self.dpo_reference_free,
+            ref_chosen_loss=dpo_inputs.get("ref_chosen_loss", None),
+            ref_rejected_loss=dpo_inputs.get("ref_rejected_loss", None),
+            dpo_weight=dpo_inputs.get("dpo_weight", None),
+        )
+
     def forward(self, data, inputs=None):
+        if self.task.startswith("dpo"):
+            return self.forward_dpo(data, inputs=inputs)
         if inputs is None: inputs = self.get_pipeline_inputs(data)
         inputs = self.transfer_data_to_device(inputs, self.pipe.device, self.pipe.torch_dtype)
         for unit in self.pipe.units:
@@ -121,6 +244,13 @@ def wan_parser():
     parser.add_argument("--audio_processor_path", type=str, default=None, help="Path to the audio processor. If provided, the processor will be used for Wan2.2-S2V model.")
     parser.add_argument("--max_timestep_boundary", type=float, default=1.0, help="Max timestep boundary (for mixed models, e.g., Wan-AI/Wan2.2-I2V-A14B).")
     parser.add_argument("--min_timestep_boundary", type=float, default=0.0, help="Min timestep boundary (for mixed models, e.g., Wan-AI/Wan2.2-I2V-A14B).")
+    parser.add_argument("--dpo_beta", type=float, default=0.1, help="DPO beta for preference logits.")
+    parser.add_argument("--dpo_lambda_sft", type=float, default=0.1, help="Weight of the chosen SFT regularization term in DPO.")
+    parser.set_defaults(dpo_reference_free=True)
+    parser.add_argument("--dpo_reference_free", dest="dpo_reference_free", action="store_true", help="Use reference-free DPO. This is the default.")
+    parser.add_argument("--dpo_use_reference", dest="dpo_reference_free", action="store_false", help="Use precomputed reference losses for DPO.")
+    parser.add_argument("--dpo_ref_loss_key_chosen", type=str, default="ref_loss_chosen", help="Metadata/cache key for chosen reference loss.")
+    parser.add_argument("--dpo_ref_loss_key_rejected", type=str, default="ref_loss_rejected", help="Metadata/cache key for rejected reference loss.")
     parser.add_argument("--initialize_model_on_cpu", default=False, action="store_true", help="Whether to initialize models on CPU.")
     parser.add_argument("--framewise_decoding", default=False, action="store_true", help="Enable it if this model is a WanToDance global model.")
     return parser
@@ -178,6 +308,11 @@ if __name__ == "__main__":
         device="cpu" if (args.initialize_model_on_cpu or args.enable_model_cpu_offload) else accelerator.device,
         max_timestep_boundary=args.max_timestep_boundary,
         min_timestep_boundary=args.min_timestep_boundary,
+        dpo_beta=args.dpo_beta,
+        dpo_lambda_sft=args.dpo_lambda_sft,
+        dpo_reference_free=args.dpo_reference_free,
+        dpo_ref_loss_key_chosen=args.dpo_ref_loss_key_chosen,
+        dpo_ref_loss_key_rejected=args.dpo_ref_loss_key_rejected,
     )
     model_logger = ModelLogger(
         args.output_path,
@@ -191,9 +326,12 @@ if __name__ == "__main__":
     launcher_map = {
         "sft:data_process": launch_data_process_task,
         "direct_distill:data_process": launch_data_process_task,
+        "dpo:data_process": launch_data_process_task,
         "sft": launch_training_task,
         "sft:train": launch_training_task,
         "direct_distill": launch_training_task,
         "direct_distill:train": launch_training_task,
+        "dpo": launch_training_task,
+        "dpo:train": launch_training_task,
     }
     launcher_map[args.task](accelerator, dataset, model, model_logger, args=args)
