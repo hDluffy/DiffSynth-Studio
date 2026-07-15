@@ -276,6 +276,8 @@ if __name__ == "__main__":
             height_division_factor=16,
             width_division_factor=16,
             num_frames=args.num_frames,
+            frame_rate=args.frame_rate,
+            fix_frame_rate=args.fix_frame_rate,
             time_division_factor=4 if not args.framewise_decoding else 1,
             time_division_remainder=1 if not args.framewise_decoding else 0,
         ),

@@ -489,15 +489,28 @@ class WanS2VModel(torch.nn.Module):
         merged_audio_emb = audio_emb[:, motion_frames[1]:, :]
         return audio_emb_global, merged_audio_emb
 
+    # def get_grid_sizes(self, grid_size_x, grid_size_ref):
+    #     f, h, w = grid_size_x
+    #     rf, rh, rw = grid_size_ref
+    #     grid_sizes_x = torch.tensor([f, h, w], dtype=torch.long).unsqueeze(0)
+    #     grid_sizes_x = [[torch.zeros_like(grid_sizes_x), grid_sizes_x, grid_sizes_x]]
+    #     grid_sizes_ref = [[
+    #         torch.tensor([30, 0, 0]).unsqueeze(0),
+    #         torch.tensor([31, rh, rw]).unsqueeze(0),
+    #         torch.tensor([1, rh, rw]).unsqueeze(0),
+    #     ]]
+    #     return grid_sizes_x + grid_sizes_ref
+
     def get_grid_sizes(self, grid_size_x, grid_size_ref):
         f, h, w = grid_size_x
         rf, rh, rw = grid_size_ref
         grid_sizes_x = torch.tensor([f, h, w], dtype=torch.long).unsqueeze(0)
         grid_sizes_x = [[torch.zeros_like(grid_sizes_x), grid_sizes_x, grid_sizes_x]]
+        ref_time_id = max(30, int(f) + 9)
         grid_sizes_ref = [[
-            torch.tensor([30, 0, 0]).unsqueeze(0),
-            torch.tensor([31, rh, rw]).unsqueeze(0),
-            torch.tensor([1, rh, rw]).unsqueeze(0),
+            torch.tensor([ref_time_id, 0, 0]).unsqueeze(0),
+            torch.tensor([ref_time_id + int(rf), rh, rw]).unsqueeze(0),
+            torch.tensor([rf, rh, rw]).unsqueeze(0),
         ]]
         return grid_sizes_x + grid_sizes_ref
 
