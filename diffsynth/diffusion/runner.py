@@ -102,16 +102,24 @@ def launch_data_process_task(
         model.to(device=accelerator.device)
         model, dataloader = accelerator.prepare(model, dataloader)
     
+    cache_key_field = getattr(dataset, "cache_key_field", "_data_cache_key")
     for data_id, data in enumerate(tqdm(dataloader)):
+        cache_key = None
+        if isinstance(data, dict):
+            cache_key = data.pop(cache_key_field, None)
         with accelerator.accumulate(model):
             with torch.no_grad():
                 folder = os.path.join(model_logger.output_path, str(accelerator.process_index))
                 os.makedirs(folder, exist_ok=True)
-                save_path = os.path.join(model_logger.output_path, str(accelerator.process_index), f"{data_id}.pth")
+                file_name = f"{cache_key}.pth" if cache_key else f"{data_id:08d}.pth"
+                save_path = os.path.join(folder, file_name)
+                tmp_save_path = save_path + ".tmp"
                 data = model(data)
-                torch.save(data, save_path)
+                torch.save(data, tmp_save_path)
+                os.replace(tmp_save_path, save_path)
                 if enable_model_cpu_offload:
                     offload_manager.after_backward()
+    accelerator.wait_for_everyone()
 
 def initialize_deepspeed_gradient_checkpointing(accelerator: Accelerator):
     if getattr(accelerator.state, "deepspeed_plugin", None) is not None:
