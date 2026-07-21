@@ -78,6 +78,14 @@ cd /app/DiffSynth-Studio
 MASTER_ADDR=node1 NODE_RANK=1 bash examples/wanvideo/model_training/full/Wan2.2-S2V-14B-multinode.sh
 ```
 
+后端运行
+```bash
+#node1
+NODE_RANK=0 nohup bash examples/wanvideo/model_training/full/Wan2.2-S2V-14B-multinode-cache-run.sh > train.log 2>&1 & tail -f train.log
+#node2
+NODE_RANK=1 nohup bash examples/wanvideo/model_training/full/Wan2.2-S2V-14B-multinode-cache-run.sh > train.log 2>&1 & tail -f train.log
+```
+
 两个节点需要在较短时间内都启动。`node1` 会等待 `node2` 加入分布式 rendezvous。
 
 ## 常用参数

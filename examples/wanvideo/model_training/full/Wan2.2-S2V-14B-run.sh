@@ -2,16 +2,16 @@
   --dataset_base_path data/train_data \
   --dataset_metadata_path data/train_data/metadata.csv \
   --data_file_keys "video,input_audio,s2v_pose_video" \
-  --height 576 \
-  --width 1024 \
+  --max_pixels 589824 \
   --num_frames 81 \
   --frame_rate 16 \
   --fix_frame_rate True \
-  --dataset_repeat 5 \
+  --dataset_repeat 1 \
   --model_id_with_origin_paths "Wan-AI/Wan2.2-S2V-14B:diffusion_pytorch_model*.safetensors,Wan-AI/Wan2.2-S2V-14B:wav2vec2-large-xlsr-53-english/model.safetensors,Wan-AI/Wan2.2-S2V-14B:models_t5_umt5-xxl-enc-bf16.pth,Wan-AI/Wan2.2-S2V-14B:Wan2.1_VAE.pth" \
   --audio_processor_path "Wan-AI/Wan2.2-S2V-14B:wav2vec2-large-xlsr-53-english/" \
   --learning_rate 1e-5 \
   --num_epochs 100 \
+  --save_steps 200 \
   --trainable_models "dit" \
   --remove_prefix_in_ckpt "pipe.dit." \
   --output_path "./models/train/Wan2.2-S2V-14B_full" \
