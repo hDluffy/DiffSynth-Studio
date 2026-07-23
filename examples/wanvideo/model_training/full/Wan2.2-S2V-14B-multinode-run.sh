@@ -93,8 +93,8 @@ echo "  ninja: $(command -v ninja)"
   --main_process_port "${MASTER_PORT}" \
   --same_network \
   "${TRAIN_SCRIPT}" \
-  --dataset_base_path data/test_data \
-  --dataset_metadata_path data/test_data/metadata.csv \
+  --dataset_base_path /data/work/train_data_5s \
+  --dataset_metadata_path /data/work/train_data_5s/metadata.csv \
   --data_file_keys "video,input_audio" \
   --max_pixels 589824 \
   --num_frames 81 \

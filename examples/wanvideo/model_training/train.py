@@ -17,6 +17,9 @@ class WanTrainingModule(DiffusionTrainingModule):
         use_gradient_checkpointing=True,
         use_gradient_checkpointing_offload=False,
         extra_inputs=None,
+        tiled=False,
+        tile_size=(30, 52),
+        tile_stride=(15, 26),
         fp8_models=None,
         offload_models=None,
         resume_from_checkpoint=None, remove_prefix_in_ckpt=None,
@@ -38,8 +41,14 @@ class WanTrainingModule(DiffusionTrainingModule):
 
         # Load models
         model_configs = self.parse_model_configs(model_paths, model_id_with_origin_paths, fp8_models=fp8_models, offload_models=offload_models, device=device)
-        tokenizer_config = ModelConfig(model_id="Wan-AI/Wan2.1-T2V-1.3B", origin_file_pattern="google/umt5-xxl/") if tokenizer_path is None else ModelConfig(tokenizer_path)
-        audio_processor_config = self.parse_path_or_model_id(audio_processor_path)
+        if task.endswith(":train") and tokenizer_path is None:
+            tokenizer_config = None
+        else:
+            tokenizer_config = ModelConfig(model_id="Wan-AI/Wan2.1-T2V-1.3B", origin_file_pattern="google/umt5-xxl/") if tokenizer_path is None else ModelConfig(tokenizer_path)
+        if task.endswith(":train") and audio_processor_path in (None, ""):
+            audio_processor_config = None
+        else:
+            audio_processor_config = self.parse_path_or_model_id(audio_processor_path)
         self.pipe = WanVideoPipeline.from_pretrained(torch_dtype=torch.bfloat16, device=device, model_configs=model_configs, tokenizer_config=tokenizer_config, audio_processor_config=audio_processor_config)
         self.pipe = self.split_pipeline_units(task, self.pipe, trainable_models, lora_base_model)
         self.resume_from_checkpoint(resume_from_checkpoint, remove_prefix_in_ckpt)
@@ -56,6 +65,9 @@ class WanTrainingModule(DiffusionTrainingModule):
         self.use_gradient_checkpointing = use_gradient_checkpointing
         self.use_gradient_checkpointing_offload = use_gradient_checkpointing_offload
         self.extra_inputs = extra_inputs.split(",") if extra_inputs is not None else []
+        self.tiled = tiled
+        self.tile_size = tile_size
+        self.tile_stride = tile_stride
         self.fp8_models = fp8_models
         self.task = task
         self.dpo_beta = dpo_beta
@@ -123,7 +135,9 @@ class WanTrainingModule(DiffusionTrainingModule):
             # Please do not modify the following parameters
             # unless you clearly know what this will cause.
             "cfg_scale": 1,
-            "tiled": False,
+            "tiled": self.tiled,
+            "tile_size": self.tile_size,
+            "tile_stride": self.tile_stride,
             "rand_device": self.pipe.device,
             "use_gradient_checkpointing": self.use_gradient_checkpointing,
             "use_gradient_checkpointing_offload": self.use_gradient_checkpointing_offload,
@@ -236,6 +250,18 @@ class WanTrainingModule(DiffusionTrainingModule):
         return loss
 
 
+def parse_int_pair(value):
+    if isinstance(value, tuple):
+        return value
+    parts = str(value).replace("x", ",").split(",")
+    if len(parts) != 2:
+        raise argparse.ArgumentTypeError("Expected two integers, for example 30,52 or 30x52.")
+    try:
+        return tuple(int(part) for part in parts)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("Expected two integers, for example 30,52 or 30x52.") from exc
+
+
 def wan_parser():
     parser = argparse.ArgumentParser(description="Simple example of a training script.")
     parser = add_general_config(parser)
@@ -253,6 +279,9 @@ def wan_parser():
     parser.add_argument("--dpo_ref_loss_key_rejected", type=str, default="ref_loss_rejected", help="Metadata/cache key for rejected reference loss.")
     parser.add_argument("--initialize_model_on_cpu", default=False, action="store_true", help="Whether to initialize models on CPU.")
     parser.add_argument("--framewise_decoding", default=False, action="store_true", help="Enable it if this model is a WanToDance global model.")
+    parser.add_argument("--tiled", default=False, action="store_true", help="Use tiled VAE encode/decode in pipeline preprocessing.")
+    parser.add_argument("--tile_size", type=parse_int_pair, default=(30, 52), help="VAE tile size as H,W or HxW. Used with --tiled.")
+    parser.add_argument("--tile_stride", type=parse_int_pair, default=(15, 26), help="VAE tile stride as H,W or HxW. Used with --tiled.")
     return parser
 
 
@@ -302,6 +331,9 @@ if __name__ == "__main__":
         use_gradient_checkpointing=args.use_gradient_checkpointing,
         use_gradient_checkpointing_offload=args.use_gradient_checkpointing_offload,
         extra_inputs=args.extra_inputs,
+        tiled=args.tiled,
+        tile_size=args.tile_size,
+        tile_stride=args.tile_stride,
         fp8_models=args.fp8_models,
         offload_models=args.offload_models,
         resume_from_checkpoint=args.resume_from_checkpoint,
