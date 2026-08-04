@@ -366,7 +366,19 @@ class DiffusionTrainingModule(torch.nn.Module):
         state_dict = load_state_dict(path)
         if remove_prefix_in_ckpt is not None:
             state_dict = {remove_prefix_in_ckpt + i: state_dict[i] for i in state_dict}
-        missing_keys, unexpected_keys = self.load_state_dict(state_dict, strict=False)
-        if len(unexpected_keys) != 0:
-            raise ValueError(f"Cannot load checkpoint: {path}. {len(unexpected_keys)} keys are unexpected.")
+        from transformers.integrations import is_deepspeed_zero3_enabled
+        if is_deepspeed_zero3_enabled():
+            model_keys = set(self.state_dict().keys())
+            unexpected_keys = [key for key in state_dict if key not in model_keys]
+            if len(unexpected_keys) != 0:
+                raise ValueError(f"Cannot load checkpoint: {path}. {len(unexpected_keys)} keys are unexpected.")
+            from transformers.integrations.deepspeed import _load_state_dict_into_zero3_model
+            error_msgs, missing_keys = _load_state_dict_into_zero3_model(self, state_dict)
+            if len(error_msgs) != 0:
+                error_msg = "; ".join(error_msgs)
+                raise RuntimeError(f"Cannot load checkpoint: {path}. {error_msg}")
+        else:
+            missing_keys, unexpected_keys = self.load_state_dict(state_dict, strict=False)
+            if len(unexpected_keys) != 0:
+                raise ValueError(f"Cannot load checkpoint: {path}. {len(unexpected_keys)} keys are unexpected.")
         print(f"Loaded checkpoint from {path}. {len(state_dict)} keys are available.")

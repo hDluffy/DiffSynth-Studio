@@ -94,10 +94,10 @@ echo "  ninja: $(command -v ninja)"
   --same_network \
   "${TRAIN_SCRIPT}" \
   --dataset_base_path /data/work/train_data_5s \
-  --dataset_metadata_path /data/work/train_data_5s/metadata_rd4000_724.csv \
+  --dataset_metadata_path /data/work/train_data_5s/metadata_724_727_729_731_8_3.csv \
   --data_file_keys "video,input_audio" \
   --max_pixels 589824 \
-  --num_frames 81 \
+  --num_frames 77 \
   --frame_rate 16 \
   --fix_frame_rate True \
   --dataset_repeat 1 \
@@ -108,8 +108,8 @@ echo "  ninja: $(command -v ninja)"
   --save_steps 200 \
   --trainable_models "dit" \
   --remove_prefix_in_ckpt "pipe.dit." \
-  --output_path "./models/train/Wan2.2-S2V-14B_full_resume_from_step1000_step400_step1400" \
+  --output_path "./models/train/Wan2.2-S2V-14B_full_resume_from_step1000_step400_step1400_step1000" \
   --extra_inputs "input_image,input_audio" \
-  --resume_from_checkpoint "./models/train/Wan2.2-S2V-14B_full_resume_from_step1000_step400/step-1400.safetensors" \
+  --resume_from_checkpoint "./models/train/Wan2.2-S2V-14B_full_resume_from_step1000_step400_step1400/step-1000.safetensors" \
   --enable_tensorboard_log \
   --use_gradient_checkpointing_offload
