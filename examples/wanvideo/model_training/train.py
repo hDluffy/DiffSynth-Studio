@@ -32,6 +32,11 @@ class WanTrainingModule(DiffusionTrainingModule):
         dpo_reference_free=True,
         dpo_ref_loss_key_chosen="ref_loss_chosen",
         dpo_ref_loss_key_rejected="ref_loss_rejected",
+        s2v_ref_rope_mode="legacy_time_offset",
+        s2v_ref_source_id=1.0,
+        s2v_ref_rope_theta=10000.0,
+        s2v_ref_time_base=30,
+        s2v_ref_time_margin=9,
     ):
         super().__init__()
         # Warning
@@ -50,6 +55,13 @@ class WanTrainingModule(DiffusionTrainingModule):
         else:
             audio_processor_config = self.parse_path_or_model_id(audio_processor_path)
         self.pipe = WanVideoPipeline.from_pretrained(torch_dtype=torch.bfloat16, device=device, model_configs=model_configs, tokenizer_config=tokenizer_config, audio_processor_config=audio_processor_config)
+        self.pipe.configure_s2v_ref_rope(
+            mode=s2v_ref_rope_mode,
+            source_id=s2v_ref_source_id,
+            theta=s2v_ref_rope_theta,
+            time_base=s2v_ref_time_base,
+            time_margin=s2v_ref_time_margin,
+        )
         self.pipe = self.split_pipeline_units(task, self.pipe, trainable_models, lora_base_model)
         self.resume_from_checkpoint(resume_from_checkpoint, remove_prefix_in_ckpt)
         
@@ -282,6 +294,11 @@ def wan_parser():
     parser.add_argument("--tiled", default=False, action="store_true", help="Use tiled VAE encode/decode in pipeline preprocessing.")
     parser.add_argument("--tile_size", type=parse_int_pair, default=(30, 52), help="VAE tile size as H,W or HxW. Used with --tiled.")
     parser.add_argument("--tile_stride", type=parse_int_pair, default=(15, 26), help="VAE tile stride as H,W or HxW. Used with --tiled.")
+    parser.add_argument("--s2v_ref_rope_mode", type=str, default="legacy_time_offset", choices=("legacy_time_offset", "source_id_time_offset", "source_id_local"), help="Reference-frame RoPE mode for Wan2.2-S2V.")
+    parser.add_argument("--s2v_ref_source_id", type=float, default=1.0, help="Reference-frame source_id when S2V source_id RoPE is enabled.")
+    parser.add_argument("--s2v_ref_rope_theta", type=float, default=10000.0, help="RoPE theta used for the S2V reference-frame source_id phase.")
+    parser.add_argument("--s2v_ref_time_base", type=int, default=30, help="Minimum legacy time offset for the S2V reference frame.")
+    parser.add_argument("--s2v_ref_time_margin", type=int, default=9, help="Legacy time offset margin after the target latent length for the S2V reference frame.")
     return parser
 
 
@@ -347,6 +364,11 @@ if __name__ == "__main__":
         dpo_reference_free=args.dpo_reference_free,
         dpo_ref_loss_key_chosen=args.dpo_ref_loss_key_chosen,
         dpo_ref_loss_key_rejected=args.dpo_ref_loss_key_rejected,
+        s2v_ref_rope_mode=args.s2v_ref_rope_mode,
+        s2v_ref_source_id=args.s2v_ref_source_id,
+        s2v_ref_rope_theta=args.s2v_ref_rope_theta,
+        s2v_ref_time_base=args.s2v_ref_time_base,
+        s2v_ref_time_margin=args.s2v_ref_time_margin,
     )
     model_logger = ModelLogger(
         args.output_path,

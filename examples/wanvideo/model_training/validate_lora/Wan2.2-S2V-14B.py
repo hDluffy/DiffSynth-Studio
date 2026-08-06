@@ -1,4 +1,5 @@
 import torch
+import os
 from PIL import Image
 import librosa
 from diffsynth.utils.data import VideoData, save_video_with_audio
@@ -14,6 +15,13 @@ pipe = WanVideoPipeline.from_pretrained(
         ModelConfig(model_id="Wan-AI/Wan2.2-S2V-14B", origin_file_pattern="Wan2.1_VAE.pth"),
     ],
     audio_processor_config=ModelConfig(model_id="Wan-AI/Wan2.2-S2V-14B", origin_file_pattern="wav2vec2-large-xlsr-53-english/"),
+)
+pipe.configure_s2v_ref_rope(
+    mode=os.getenv("S2V_REF_ROPE_MODE", "legacy_time_offset"),
+    source_id=float(os.getenv("S2V_REF_SOURCE_ID", "1.0")),
+    theta=float(os.getenv("S2V_REF_ROPE_THETA", "10000.0")),
+    time_base=int(os.getenv("S2V_REF_TIME_BASE", "30")),
+    time_margin=int(os.getenv("S2V_REF_TIME_MARGIN", "9")),
 )
 
 pipe.load_lora(pipe.dit, "models/train/Wan2.2-S2V-14B_lora/epoch-4.safetensors", alpha=1)

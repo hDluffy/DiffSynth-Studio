@@ -37,6 +37,11 @@ REMOVE_PREFIX_IN_CKPT=${REMOVE_PREFIX_IN_CKPT:-pipe.dit.}
 EXTRA_INPUTS=${EXTRA_INPUTS:-input_image,input_audio}
 USE_GRADIENT_CHECKPOINTING_OFFLOAD=${USE_GRADIENT_CHECKPOINTING_OFFLOAD:-1}
 NUM_PROCESSES=${NUM_PROCESSES:-}
+S2V_REF_ROPE_MODE=${S2V_REF_ROPE_MODE:-legacy_time_offset}
+S2V_REF_SOURCE_ID=${S2V_REF_SOURCE_ID:-1.0}
+S2V_REF_ROPE_THETA=${S2V_REF_ROPE_THETA:-10000.0}
+S2V_REF_TIME_BASE=${S2V_REF_TIME_BASE:-30}
+S2V_REF_TIME_MARGIN=${S2V_REF_TIME_MARGIN:-9}
 
 export PYTHONPATH="${PYTHONPATH:-.}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
@@ -78,6 +83,11 @@ MODEL_ARGS=(
   --trainable_models "${TRAINABLE_MODELS}"
   --remove_prefix_in_ckpt "${REMOVE_PREFIX_IN_CKPT}"
   --extra_inputs "${EXTRA_INPUTS}"
+  --s2v_ref_rope_mode "${S2V_REF_ROPE_MODE}"
+  --s2v_ref_source_id "${S2V_REF_SOURCE_ID}"
+  --s2v_ref_rope_theta "${S2V_REF_ROPE_THETA}"
+  --s2v_ref_time_base "${S2V_REF_TIME_BASE}"
+  --s2v_ref_time_margin "${S2V_REF_TIME_MARGIN}"
 )
 if [ -n "${OFFLOAD_MODELS}" ]; then
   MODEL_ARGS+=(--offload_models "${OFFLOAD_MODELS}")
@@ -115,6 +125,7 @@ echo "  tile_size: ${TILE_SIZE}"
 echo "  tile_stride: ${TILE_STRIDE}"
 echo "  offload_models: ${OFFLOAD_MODELS:-none}"
 echo "  fp8_models: ${FP8_MODELS:-none}"
+echo "  s2v_ref_rope_mode: ${S2V_REF_ROPE_MODE}"
 echo "  pytorch_cuda_alloc_conf: ${PYTORCH_CUDA_ALLOC_CONF}"
 
 run_accelerate "${DATA_PROCESS_CONFIG_FILE}" "${TRAIN_SCRIPT}" \

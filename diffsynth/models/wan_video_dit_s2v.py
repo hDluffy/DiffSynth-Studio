@@ -7,6 +7,9 @@ from .wan_video_dit import rearrange, precompute_freqs_cis_3d, DiTBlock, Head, C
 from ..core.gradient import gradient_checkpoint_forward
 
 
+S2V_REF_ROPE_MODES = {"legacy_time_offset", "source_id_time_offset", "source_id_local"}
+
+
 def torch_dfs(model: nn.Module, parent_name='root'):
     module_names, modules = [], []
     current_name = parent_name if parent_name else 'root'
@@ -81,6 +84,12 @@ def rope_precompute(x, grid_sizes, freqs, start=None):
                 output[i, seq_bucket[-1]:seq_bucket[-1] + seq_len] = freqs_i
         seq_bucket.append(seq_bucket[-1] + seq_len)
     return output
+
+
+def get_1d_rope_phase_for_position(dim, position, theta=10000.0, device=None):
+    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=torch.float64, device=device)[: (dim // 2)] / dim))
+    phase = torch.outer(torch.as_tensor([float(position)], dtype=torch.float64, device=device), freqs)
+    return torch.polar(torch.ones_like(phase), phase)
 
 
 class CausalConv1d(nn.Module):
@@ -383,6 +392,11 @@ class WanS2VModel(torch.nn.Module):
         require_vae_embedding: bool = False,
         seperated_timestep: bool = False,
         require_clip_embedding: bool = False,
+        s2v_ref_rope_mode: str = "legacy_time_offset",
+        s2v_ref_source_id: float = 1.0,
+        s2v_ref_rope_theta: float = 10000.0,
+        s2v_ref_time_base: int = 30,
+        s2v_ref_time_margin: int = 9,
     ):
         super().__init__()
         self.dim = dim
@@ -397,6 +411,13 @@ class WanS2VModel(torch.nn.Module):
         self.require_vae_embedding = require_vae_embedding
         self.seperated_timestep = seperated_timestep
         self.require_clip_embedding = require_clip_embedding
+        self.configure_ref_rope(
+            mode=s2v_ref_rope_mode,
+            source_id=s2v_ref_source_id,
+            theta=s2v_ref_rope_theta,
+            time_base=s2v_ref_time_base,
+            time_margin=s2v_ref_time_margin,
+        )
 
         self.patch_embedding = nn.Conv3d(in_dim, dim, kernel_size=patch_size, stride=patch_size)
         self.text_embedding = nn.Sequential(nn.Linear(text_dim, dim), nn.GELU(approximate='tanh'), nn.Linear(dim, dim))
@@ -421,6 +442,28 @@ class WanS2VModel(torch.nn.Module):
         )
         self.trainable_cond_mask = nn.Embedding(3, dim)
         self.frame_packer = FramePackMotioner(inner_dim=dim, num_heads=num_heads, zip_frame_buckets=[1, 2, 16], drop_mode=framepack_drop_mode)
+
+    def configure_ref_rope(
+        self,
+        mode=None,
+        source_id=None,
+        theta=None,
+        time_base=None,
+        time_margin=None,
+    ):
+        if mode is not None:
+            if mode not in S2V_REF_ROPE_MODES:
+                supported_modes = ", ".join(sorted(S2V_REF_ROPE_MODES))
+                raise ValueError(f"Unsupported s2v reference RoPE mode `{mode}`. Supported modes: {supported_modes}.")
+            self.s2v_ref_rope_mode = mode
+        if source_id is not None:
+            self.s2v_ref_source_id = float(source_id)
+        if theta is not None:
+            self.s2v_ref_rope_theta = float(theta)
+        if time_base is not None:
+            self.s2v_ref_time_base = int(time_base)
+        if time_margin is not None:
+            self.s2v_ref_time_margin = int(time_margin)
 
     def patchify(self, x: torch.Tensor):
         grid_size = x.shape[2:]
@@ -501,18 +544,39 @@ class WanS2VModel(torch.nn.Module):
     #     ]]
     #     return grid_sizes_x + grid_sizes_ref
 
+    def get_ref_time_id(self, f):
+        return max(self.s2v_ref_time_base, int(f) + self.s2v_ref_time_margin)
+
     def get_grid_sizes(self, grid_size_x, grid_size_ref):
         f, h, w = grid_size_x
         rf, rh, rw = grid_size_ref
         grid_sizes_x = torch.tensor([f, h, w], dtype=torch.long).unsqueeze(0)
         grid_sizes_x = [[torch.zeros_like(grid_sizes_x), grid_sizes_x, grid_sizes_x]]
-        ref_time_id = max(30, int(f) + 9)
+        ref_time_id = 0 if self.s2v_ref_rope_mode == "source_id_local" else self.get_ref_time_id(f)
         grid_sizes_ref = [[
             torch.tensor([ref_time_id, 0, 0]).unsqueeze(0),
             torch.tensor([ref_time_id + int(rf), rh, rw]).unsqueeze(0),
             torch.tensor([rf, rh, rw]).unsqueeze(0),
         ]]
         return grid_sizes_x + grid_sizes_ref
+
+    def build_s2v_rope(self, token_states, grid_sizes, seq_len_x, ref_seq_len):
+        freqs = rope_precompute(
+            token_states.detach().view(1, token_states.size(1), self.num_heads, self.dim // self.num_heads),
+            grid_sizes,
+            self.freqs,
+            start=None,
+        )
+        if ref_seq_len > 0 and self.s2v_ref_rope_mode in {"source_id_time_offset", "source_id_local"}:
+            source_phase = get_1d_rope_phase_for_position(
+                self.dim // self.num_heads,
+                self.s2v_ref_source_id,
+                theta=self.s2v_ref_rope_theta,
+                device=token_states.device,
+            ).view(1, 1, 1, -1)
+            ref_start, ref_end = seq_len_x, seq_len_x + ref_seq_len
+            freqs[:, ref_start:ref_end] = freqs[:, ref_start:ref_end] * source_phase
+        return freqs
 
     def forward(
         self,
@@ -546,9 +610,7 @@ class WanS2VModel(torch.nn.Module):
         # mask
         mask = torch.cat([torch.zeros([1, seq_len_x]), torch.ones([1, ref_latents.shape[1]])], dim=1).to(torch.long).to(x.device)
         # freqs
-        pre_compute_freqs = rope_precompute(
-            x.detach().view(1, x.size(1), self.num_heads, self.dim // self.num_heads), grid_sizes, self.freqs, start=None
-        )
+        pre_compute_freqs = self.build_s2v_rope(x, grid_sizes, seq_len_x, ref_latents.shape[1])
         # motion
         x, pre_compute_freqs, mask = self.inject_motion(x, pre_compute_freqs, mask, motion_latents, add_last_motion=2)
 

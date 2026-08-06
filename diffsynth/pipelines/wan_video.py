@@ -17,7 +17,6 @@ from ..core import ModelConfig, gradient_checkpoint_forward
 from ..diffusion.base_pipeline import BasePipeline, PipelineUnit
 
 from ..models.wan_video_dit import WanModel, sinusoidal_embedding_1d
-from ..models.wan_video_dit_s2v import rope_precompute
 from ..models.wan_video_text_encoder import WanTextEncoder, HuggingfaceTokenizer
 from ..models.wan_video_vae import WanVideoVAE
 from ..models.wan_video_image_encoder import WanImageEncoder
@@ -106,6 +105,26 @@ class WanVideoPipeline(BasePipeline):
             self.vace2.forward = types.MethodType(usp_vace_forward, self.vace2)
         self.sp_size = get_sequence_parallel_world_size()
         self.use_unified_sequence_parallel = True
+
+
+    def configure_s2v_ref_rope(
+        self,
+        mode=None,
+        source_id=None,
+        theta=None,
+        time_base=None,
+        time_margin=None,
+    ):
+        for dit in (self.dit, self.dit2):
+            if dit is not None and hasattr(dit, "configure_ref_rope"):
+                dit.configure_ref_rope(
+                    mode=mode,
+                    source_id=source_id,
+                    theta=theta,
+                    time_base=time_base,
+                    time_margin=time_margin,
+                )
+        return self
 
 
     @staticmethod
@@ -206,6 +225,11 @@ class WanVideoPipeline(BasePipeline):
         s2v_pose_video: list[Image.Image] = None,
         s2v_pose_latents: torch.Tensor = None,
         motion_video: list[Image.Image] = None,
+        s2v_ref_rope_mode: str = None,
+        s2v_ref_source_id: float = None,
+        s2v_ref_rope_theta: float = None,
+        s2v_ref_time_base: int = None,
+        s2v_ref_time_margin: int = None,
         # ControlNet
         control_video: list[Image.Image] = None,
         reference_image: Image.Image = None,
@@ -269,6 +293,13 @@ class WanVideoPipeline(BasePipeline):
     ):
         # Scheduler
         self.scheduler.set_timesteps(num_inference_steps, denoising_strength=denoising_strength, shift=sigma_shift)
+        self.configure_s2v_ref_rope(
+            mode=s2v_ref_rope_mode,
+            source_id=s2v_ref_source_id,
+            theta=s2v_ref_rope_theta,
+            time_base=s2v_ref_time_base,
+            time_margin=s2v_ref_time_margin,
+        )
         
         # Inputs
         inputs_posi = {
@@ -1668,7 +1699,7 @@ def model_fn_wans2v(
     # mask
     mask = torch.cat([torch.zeros([1, seq_len_x]), torch.ones([1, ref_latents.shape[1]])], dim=1).to(torch.long).to(x.device)
     # freqs
-    pre_compute_freqs = rope_precompute(x.detach().view(1, x.size(1), dit.num_heads, dit.dim // dit.num_heads), grid_sizes, dit.freqs, start=None)
+    pre_compute_freqs = dit.build_s2v_rope(x, grid_sizes, seq_len_x, ref_latents.shape[1])
     # motion
     x, pre_compute_freqs, mask = dit.inject_motion(x, pre_compute_freqs, mask, motion_latents, drop_motion_frames=drop_motion_frames, add_last_motion=2)
 

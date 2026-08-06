@@ -44,6 +44,11 @@ TRAINABLE_MODELS="${TRAINABLE_MODELS:-dit}"
 REMOVE_PREFIX_IN_CKPT="${REMOVE_PREFIX_IN_CKPT:-pipe.dit.}"
 EXTRA_INPUTS="${EXTRA_INPUTS:-input_image,input_audio}"
 USE_GRADIENT_CHECKPOINTING_OFFLOAD="${USE_GRADIENT_CHECKPOINTING_OFFLOAD:-1}"
+S2V_REF_ROPE_MODE="${S2V_REF_ROPE_MODE:-legacy_time_offset}"
+S2V_REF_SOURCE_ID="${S2V_REF_SOURCE_ID:-1.0}"
+S2V_REF_ROPE_THETA="${S2V_REF_ROPE_THETA:-10000.0}"
+S2V_REF_TIME_BASE="${S2V_REF_TIME_BASE:-30}"
+S2V_REF_TIME_MARGIN="${S2V_REF_TIME_MARGIN:-9}"
 
 if [[ "${ACCELERATE_BIN}" == */* ]]; then
   ACCELERATE_DIR="$(cd "$(dirname "${ACCELERATE_BIN}")" && pwd)"
@@ -139,6 +144,11 @@ MODEL_ARGS=(
   --trainable_models "${TRAINABLE_MODELS}"
   --remove_prefix_in_ckpt "${REMOVE_PREFIX_IN_CKPT}"
   --extra_inputs "${EXTRA_INPUTS}"
+  --s2v_ref_rope_mode "${S2V_REF_ROPE_MODE}"
+  --s2v_ref_source_id "${S2V_REF_SOURCE_ID}"
+  --s2v_ref_rope_theta "${S2V_REF_ROPE_THETA}"
+  --s2v_ref_time_base "${S2V_REF_TIME_BASE}"
+  --s2v_ref_time_margin "${S2V_REF_TIME_MARGIN}"
 )
 if [ -n "${AUDIO_PROCESSOR_PATH}" ]; then
   MODEL_ARGS+=(--audio_processor_path "${AUDIO_PROCESSOR_PATH}")
@@ -167,6 +177,7 @@ echo "  gloo_socket_ifname: ${GLOO_SOCKET_IFNAME}"
 echo "  nccl_net: ${NCCL_NET}"
 echo "  nccl_ib_disable: ${NCCL_IB_DISABLE}"
 echo "  nccl_channels: ${NCCL_MIN_NCHANNELS}-${NCCL_MAX_NCHANNELS}"
+echo "  s2v_ref_rope_mode: ${S2V_REF_ROPE_MODE}"
 echo "  ninja: $(command -v ninja)"
 
 cmd=(
