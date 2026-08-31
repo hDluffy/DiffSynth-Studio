@@ -3,16 +3,17 @@ set -euo pipefail
 
 # Run this script on every node. By default it expects node1 and node2.
 # Override NODE_RANK when the hostname does not exactly match one of NODES.
+# --resume_from_checkpoint "/path/to/step-1000.safetensors" can be used to resume training from a checkpoint.
 
 NODES="${NODES:-node1 node2}"
 MASTER_ADDR="${MASTER_ADDR:-node1}"
 MASTER_PORT="${MASTER_PORT:-29500}"
-ACCELERATE_BIN="${ACCELERATE_BIN:-/app/miniconda3/bin/accelerate}"
+ACCELERATE_BIN="${ACCELERATE_BIN:-/data-training/miniconda/bin/accelerate}"
 CONFIG_FILE="${CONFIG_FILE:-examples/wanvideo/model_training/full/accelerate_config_zero3.yaml}"
 TRAIN_SCRIPT="${TRAIN_SCRIPT:-examples/wanvideo/model_training/train.py}"
-MODEL_BASE_PATH=${MODEL_BASE_PATH:-${DIFFSYNTH_MODEL_BASE_PATH:-./models}}
+MODEL_BASE_PATH=${MODEL_BASE_PATH:-${DIFFSYNTH_MODEL_BASE_PATH:-/data-training/models}}
 export DIFFSYNTH_MODEL_BASE_PATH="${MODEL_BASE_PATH}"
-COMM_IFNAME="${COMM_IFNAME:-enp94s0f0np0}"
+COMM_IFNAME="${COMM_IFNAME:-bond0}"
 #legacy_time_offset or source_id_local
 S2V_REF_ROPE_MODE="${S2V_REF_ROPE_MODE:-legacy_time_offset}"
 S2V_REF_SOURCE_ID="${S2V_REF_SOURCE_ID:-1.0}"
@@ -102,8 +103,8 @@ echo "  ninja: $(command -v ninja)"
   --main_process_port "${MASTER_PORT}" \
   --same_network \
   "${TRAIN_SCRIPT}" \
-  --dataset_base_path /data/work/train_data_5s \
-  --dataset_metadata_path /data/work/train_data_5s/metadata_724_727_729_731_8_3.csv \
+  --dataset_base_path /data-training/train_data_5s \
+  --dataset_metadata_path /data-training/train_data_5s/metadata.csv \
   --data_file_keys "video,input_audio" \
   --max_pixels 589824 \
   --num_frames 77 \
@@ -117,9 +118,8 @@ echo "  ninja: $(command -v ninja)"
   --save_steps 200 \
   --trainable_models "dit" \
   --remove_prefix_in_ckpt "pipe.dit." \
-  --output_path "./models/train/Wan2.2-S2V-14B_full_resume_from_step1000_step400_step1400_step1000" \
+  --output_path "./models/train/Wan2.2-S2V-14B_full_all_data" \
   --extra_inputs "input_image,input_audio" \
-  --resume_from_checkpoint "./models/train/Wan2.2-S2V-14B_full_resume_from_step1000_step400_step1400/step-1000.safetensors" \
   --s2v_ref_rope_mode "${S2V_REF_ROPE_MODE}" \
   --s2v_ref_source_id "${S2V_REF_SOURCE_ID}" \
   --s2v_ref_rope_theta "${S2V_REF_ROPE_THETA}" \
