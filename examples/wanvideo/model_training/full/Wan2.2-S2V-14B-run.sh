@@ -4,6 +4,8 @@ set -euo pipefail
 ACCELERATE_BIN=${ACCELERATE_BIN:-/data-training/miniconda/bin/accelerate}
 CONFIG_FILE=${CONFIG_FILE:-examples/wanvideo/model_training/full/accelerate_config_zero3.yaml}
 TRAIN_SCRIPT=${TRAIN_SCRIPT:-examples/wanvideo/model_training/train.py}
+MODEL_BASE_PATH=${MODEL_BASE_PATH:-${DIFFSYNTH_MODEL_BASE_PATH:-./models}}
+export DIFFSYNTH_MODEL_BASE_PATH="${MODEL_BASE_PATH}"
 
 DATASET_BASE_PATH=${DATASET_BASE_PATH:-/data-training/train_data_5031}
 DATASET_METADATA_PATH=${DATASET_METADATA_PATH:-${DATASET_BASE_PATH}/metadata.csv}

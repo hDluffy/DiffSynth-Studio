@@ -10,6 +10,8 @@ MASTER_PORT="${MASTER_PORT:-29500}"
 ACCELERATE_BIN="${ACCELERATE_BIN:-/app/miniconda3/bin/accelerate}"
 CONFIG_FILE="${CONFIG_FILE:-examples/wanvideo/model_training/full/accelerate_config_zero3.yaml}"
 TRAIN_SCRIPT="${TRAIN_SCRIPT:-examples/wanvideo/model_training/train.py}"
+MODEL_BASE_PATH=${MODEL_BASE_PATH:-${DIFFSYNTH_MODEL_BASE_PATH:-./models}}
+export DIFFSYNTH_MODEL_BASE_PATH="${MODEL_BASE_PATH}"
 COMM_IFNAME="${COMM_IFNAME:-enp94s0f0np0}"
 #legacy_time_offset or source_id_local
 S2V_REF_ROPE_MODE="${S2V_REF_ROPE_MODE:-legacy_time_offset}"
