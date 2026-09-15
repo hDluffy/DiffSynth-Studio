@@ -15,7 +15,7 @@ MODEL_BASE_PATH=${MODEL_BASE_PATH:-${DIFFSYNTH_MODEL_BASE_PATH:-/data-training/m
 export DIFFSYNTH_MODEL_BASE_PATH="${MODEL_BASE_PATH}"
 COMM_IFNAME="${COMM_IFNAME:-bond0}"
 #legacy_time_offset or source_id_local
-S2V_REF_ROPE_MODE="${S2V_REF_ROPE_MODE:-legacy_time_offset}"
+S2V_REF_ROPE_MODE="${S2V_REF_ROPE_MODE:-source_id_local}"
 S2V_REF_SOURCE_ID="${S2V_REF_SOURCE_ID:-1.0}"
 S2V_REF_ROPE_THETA="${S2V_REF_ROPE_THETA:-10000.0}"
 S2V_REF_TIME_BASE="${S2V_REF_TIME_BASE:-30}"
@@ -104,21 +104,22 @@ echo "  ninja: $(command -v ninja)"
   --same_network \
   "${TRAIN_SCRIPT}" \
   --dataset_base_path /data-training/train_data_5s \
-  --dataset_metadata_path /data-training/train_data_5s/metadata.csv \
+  --dataset_metadata_path /data-training/train_data_5s/metadata_0914_10s.csv \
   --data_file_keys "video,input_audio" \
   --max_pixels 589824 \
-  --num_frames 77 \
+  --num_frames 97 \
   --frame_rate 16 \
   --fix_frame_rate True \
   --dataset_repeat 1 \
   --model_id_with_origin_paths "Wan-AI/Wan2.2-S2V-14B:diffusion_pytorch_model*.safetensors,Wan-AI/Wan2.2-S2V-14B:wav2vec2-large-xlsr-53-english/model.safetensors,Wan-AI/Wan2.2-S2V-14B:models_t5_umt5-xxl-enc-bf16.pth,Wan-AI/Wan2.2-S2V-14B:Wan2.1_VAE.pth" \
   --audio_processor_path "Wan-AI/Wan2.2-S2V-14B:wav2vec2-large-xlsr-53-english/" \
-  --learning_rate 1e-5 \
+  --learning_rate 1e-6 \
   --num_epochs 100 \
   --save_steps 200 \
   --trainable_models "dit" \
   --remove_prefix_in_ckpt "pipe.dit." \
-  --output_path "./models/train/Wan2.2-S2V-14B_full_all_data" \
+  --output_path "./models/train/Wan2.2-S2V-14B_full_all_data_sa_id_resume_1e6" \
+  --resume_from_checkpoint "/data-training/hjq/DiffSynth-Studio/models/train/merge_lv2_sa_step-600.safetensors" \
   --extra_inputs "input_image,input_audio" \
   --s2v_ref_rope_mode "${S2V_REF_ROPE_MODE}" \
   --s2v_ref_source_id "${S2V_REF_SOURCE_ID}" \
