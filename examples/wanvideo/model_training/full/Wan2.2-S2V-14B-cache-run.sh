@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ACCELERATE_BIN=${ACCELERATE_BIN:-/app/miniconda3/bin/accelerate}
+ACCELERATE_BIN=${ACCELERATE_BIN:-accelerate}
 DATA_PROCESS_CONFIG_FILE=${DATA_PROCESS_CONFIG_FILE:-${CONFIG_FILE:-examples/wanvideo/model_training/full/accelerate_config_data_process.yaml}}
 TRAIN_SCRIPT=${TRAIN_SCRIPT:-examples/wanvideo/model_training/train.py}
 MODEL_BASE_PATH=${MODEL_BASE_PATH:-${DIFFSYNTH_MODEL_BASE_PATH:-./models}}
@@ -15,17 +15,29 @@ DATASET_NUM_WORKERS=${DATASET_NUM_WORKERS:-0}
 HEIGHT=${HEIGHT:-}
 WIDTH=${WIDTH:-}
 MAX_PIXELS=${MAX_PIXELS:-589824}
-NUM_FRAMES=${NUM_FRAMES:-81}
+NUM_FRAMES=${NUM_FRAMES:-113}
+MIN_NUM_FRAMES=${MIN_NUM_FRAMES:-81}
 FRAME_RATE=${FRAME_RATE:-16}
 FIX_FRAME_RATE=${FIX_FRAME_RATE:-1}
+FRAME_COUNT_STRIDE=${FRAME_COUNT_STRIDE:-16}
+FRAME_COUNT_REMAINDER=${FRAME_COUNT_REMAINDER:-1}
+FRAME_COUNT_ROUNDING=${FRAME_COUNT_ROUNDING:-nearest}
+MAX_FRAME_PADDING=${MAX_FRAME_PADDING:-8}
+AUDIO_SAMPLE_RATE=${AUDIO_SAMPLE_RATE:-16000}
+AUDIO_DURATION_POLICY=${AUDIO_DURATION_POLICY:-trim_pad}
+AUDIO_DURATION_TOLERANCE_SECONDS=${AUDIO_DURATION_TOLERANCE_SECONDS:-0.05}
+MAX_AUDIO_PADDING_SECONDS=${MAX_AUDIO_PADDING_SECONDS:-0.5}
+MAX_AUDIO_TRIMMING_SECONDS=${MAX_AUDIO_TRIMMING_SECONDS:-}
+DATA_PROCESSING_LOG_SAMPLES=${DATA_PROCESSING_LOG_SAMPLES:-8}
+RESUME_FEATURE_CACHE=${RESUME_FEATURE_CACHE:-0}
 TILED=${TILED:-1}
 TILE_SIZE=${TILE_SIZE:-30,52}
 TILE_STRIDE=${TILE_STRIDE:-15,26}
 
 if [ -n "${HEIGHT}" ] && [ -n "${WIDTH}" ]; then
-  DATA_FEATURE_SIZE_TAG=${DATA_FEATURE_SIZE_TAG:-${HEIGHT}x${WIDTH}x${NUM_FRAMES}}
+  DATA_FEATURE_SIZE_TAG=${DATA_FEATURE_SIZE_TAG:-${HEIGHT}x${WIDTH}_f${MIN_NUM_FRAMES}-${NUM_FRAMES}_${FRAME_COUNT_STRIDE}n${FRAME_COUNT_REMAINDER}_fps${FRAME_RATE}}
 else
-  DATA_FEATURE_SIZE_TAG=${DATA_FEATURE_SIZE_TAG:-max_pixels_${MAX_PIXELS}_frames_${NUM_FRAMES}}
+  DATA_FEATURE_SIZE_TAG=${DATA_FEATURE_SIZE_TAG:-max_pixels_${MAX_PIXELS}_f${MIN_NUM_FRAMES}-${NUM_FRAMES}_${FRAME_COUNT_STRIDE}n${FRAME_COUNT_REMAINDER}_fps${FRAME_RATE}}
 fi
 DATA_FEATURE_CACHE_PATH=${DATA_FEATURE_CACHE_PATH:-${DATASET_BASE_PATH}/Wan2.2-S2V-14B_full_${DATA_FEATURE_SIZE_TAG}_features}
 
@@ -63,6 +75,16 @@ SIZE_ARGS=(
   --max_pixels "${MAX_PIXELS}"
   --num_frames "${NUM_FRAMES}"
   --frame_rate "${FRAME_RATE}"
+  --frame_count_stride "${FRAME_COUNT_STRIDE}"
+  --frame_count_remainder "${FRAME_COUNT_REMAINDER}"
+  --frame_count_rounding "${FRAME_COUNT_ROUNDING}"
+  --min_num_frames "${MIN_NUM_FRAMES}"
+  --max_frame_padding "${MAX_FRAME_PADDING}"
+  --audio_sample_rate "${AUDIO_SAMPLE_RATE}"
+  --audio_duration_policy "${AUDIO_DURATION_POLICY}"
+  --audio_duration_tolerance_seconds "${AUDIO_DURATION_TOLERANCE_SECONDS}"
+  --max_audio_padding_seconds "${MAX_AUDIO_PADDING_SECONDS}"
+  --data_processing_log_samples "${DATA_PROCESSING_LOG_SAMPLES}"
 )
 if [ -n "${HEIGHT}" ]; then
   SIZE_ARGS+=(--height "${HEIGHT}")
@@ -72,6 +94,9 @@ if [ -n "${WIDTH}" ]; then
 fi
 if [ "${FIX_FRAME_RATE}" = "1" ] || [ "${FIX_FRAME_RATE}" = "true" ] || [ "${FIX_FRAME_RATE}" = "True" ]; then
   SIZE_ARGS+=(--fix_frame_rate True)
+fi
+if [ -n "${MAX_AUDIO_TRIMMING_SECONDS}" ]; then
+  SIZE_ARGS+=(--max_audio_trimming_seconds "${MAX_AUDIO_TRIMMING_SECONDS}")
 fi
 
 TILE_ARGS=()
@@ -119,8 +144,10 @@ echo "  data_file_keys: ${DATA_FILE_KEYS}"
 echo "  config_file: ${DATA_PROCESS_CONFIG_FILE}"
 echo "  feature_cache_path: ${DATA_FEATURE_CACHE_PATH}"
 echo "  max_pixels: ${MAX_PIXELS}"
-echo "  size: ${HEIGHT:-auto}x${WIDTH:-auto}x${NUM_FRAMES}"
+echo "  size: ${HEIGHT:-auto}x${WIDTH:-auto}, frames=${MIN_NUM_FRAMES}-${NUM_FRAMES}"
+echo "  frame_count: ${FRAME_COUNT_STRIDE}n+${FRAME_COUNT_REMAINDER}, rounding=${FRAME_COUNT_ROUNDING}, max_padding=${MAX_FRAME_PADDING}"
 echo "  frame_rate: ${FRAME_RATE}"
+echo "  audio: sample_rate=${AUDIO_SAMPLE_RATE}, policy=${AUDIO_DURATION_POLICY}, tolerance=${AUDIO_DURATION_TOLERANCE_SECONDS}s, max_padding=${MAX_AUDIO_PADDING_SECONDS}s"
 echo "  fix_frame_rate: ${FIX_FRAME_RATE}"
 echo "  tiled: ${TILED}"
 echo "  tile_size: ${TILE_SIZE}"
@@ -128,11 +155,18 @@ echo "  tile_stride: ${TILE_STRIDE}"
 echo "  offload_models: ${OFFLOAD_MODELS:-none}"
 echo "  fp8_models: ${FP8_MODELS:-none}"
 echo "  s2v_ref_rope_mode: ${S2V_REF_ROPE_MODE}"
+echo "  resume_feature_cache: ${RESUME_FEATURE_CACHE}"
 echo "  pytorch_cuda_alloc_conf: ${PYTORCH_CUDA_ALLOC_CONF}"
+
+RESUME_CACHE_ARGS=()
+if [ "${RESUME_FEATURE_CACHE}" = "1" ] || [ "${RESUME_FEATURE_CACHE}" = "true" ] || [ "${RESUME_FEATURE_CACHE}" = "True" ]; then
+  RESUME_CACHE_ARGS+=(--resume_feature_cache)
+fi
 
 run_accelerate "${DATA_PROCESS_CONFIG_FILE}" "${TRAIN_SCRIPT}" \
   "${RAW_DATA_ARGS[@]}" \
   --dataset_repeat 1 \
   "${MODEL_ARGS[@]}" \
+  "${RESUME_CACHE_ARGS[@]}" \
   --task sft:data_process \
   --output_path "${DATA_FEATURE_CACHE_PATH}"

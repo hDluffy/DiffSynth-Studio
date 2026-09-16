@@ -1,6 +1,12 @@
 import torch, os, argparse, accelerate, warnings
 from diffsynth.core import UnifiedDataset
-from diffsynth.core.data.operators import LoadVideo, LoadAudio, ImageCropAndResize, ToAbsolutePath
+from diffsynth.core.data.operators import (
+    AlignAudioToVideo,
+    ImageCropAndResize,
+    LoadAudio,
+    LoadVideo,
+    ToAbsolutePath,
+)
 from diffsynth.pipelines.wan_video import WanVideoPipeline, ModelConfig
 from diffsynth.diffusion import *
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -62,7 +68,13 @@ class WanTrainingModule(DiffusionTrainingModule):
             time_base=s2v_ref_time_base,
             time_margin=s2v_ref_time_margin,
         )
-        self.pipe = self.split_pipeline_units(task, self.pipe, trainable_models, lora_base_model)
+        self.pipe = self.split_pipeline_units(
+            task,
+            self.pipe,
+            trainable_models,
+            lora_base_model,
+            remove_unnecessary_params=True,
+        )
         self.resume_from_checkpoint(resume_from_checkpoint, remove_prefix_in_ckpt)
         
         # Training mode
@@ -157,6 +169,11 @@ class WanTrainingModule(DiffusionTrainingModule):
             "vace_scale": 1,
             "max_timestep_boundary": self.max_timestep_boundary,
             "min_timestep_boundary": self.min_timestep_boundary,
+            "sample_num_frames": data.get("sample_num_frames", len(data["video"])),
+            "sample_duration_seconds": data.get("sample_duration_seconds"),
+            "audio_num_samples": data.get("audio_num_samples"),
+            "audio_sample_rate": data.get("audio_sample_rate", 16000),
+            "video_frame_rate": data.get("video_frame_rate", 16),
         }
         inputs_shared = self.parse_extra_inputs(data, self.extra_inputs, inputs_shared)
         return inputs_shared, inputs_posi, inputs_nega
@@ -309,11 +326,54 @@ if __name__ == "__main__":
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         kwargs_handlers=[accelerate.DistributedDataParallelKwargs(find_unused_parameters=args.find_unused_parameters)],
     )
+    deepspeed_plugin = getattr(accelerator.state, "deepspeed_plugin", None)
+    if deepspeed_plugin is not None:
+        deepspeed_config = deepspeed_plugin.deepspeed_config
+        zero_config = deepspeed_config.get("zero_optimization", {})
+        zero_stage = zero_config.get("stage", deepspeed_config.get("zero_stage"))
+    else:
+        zero_stage = None
+    variable_length_raw_training = (
+        args.dataset_metadata_path is not None
+        and not args.task.endswith(":data_process")
+        and args.min_num_frames < args.num_frames
+        and args.frame_count_stride is not None
+    )
+    if variable_length_raw_training and str(zero_stage) == "3":
+        raise RuntimeError(
+            "Variable-length raw-data training is unsafe with ZeRO-3 because frozen VAE "
+            "module execution counts differ across ranks. Run --task sft:data_process first, "
+            "then train the resulting cache with --task sft:train."
+        )
+    data_file_keys = args.data_file_keys.split(",")
+    max_audio_padding_seconds = None if args.max_audio_padding_seconds < 0 else args.max_audio_padding_seconds
+    audio_video_aligner = None
+    if "video" in data_file_keys and "input_audio" in data_file_keys:
+        audio_video_aligner = AlignAudioToVideo(
+            video_key="video",
+            audio_key="input_audio",
+            frame_rate=args.frame_rate,
+            sample_rate=args.audio_sample_rate,
+            policy=args.audio_duration_policy,
+            tolerance_seconds=args.audio_duration_tolerance_seconds,
+            max_padding_seconds=max_audio_padding_seconds,
+            max_trimming_seconds=args.max_audio_trimming_seconds,
+            log_first_n=args.data_processing_log_samples,
+        )
+    accelerator.print(
+        "Dataset temporal config: "
+        f"max_frames={args.num_frames}, min_frames={args.min_num_frames}, "
+        f"constraint={args.frame_count_stride or (1 if args.framewise_decoding else 4)}n+"
+        f"{args.frame_count_remainder if args.frame_count_remainder is not None else (0 if args.framewise_decoding else 1)}, "
+        f"rounding={args.frame_count_rounding}, max_frame_padding={args.max_frame_padding}, "
+        f"fps={args.frame_rate}, audio_policy={args.audio_duration_policy}, "
+        f"audio_sample_rate={args.audio_sample_rate}"
+    )
     dataset = UnifiedDataset(
         base_path=args.dataset_base_path,
         metadata_path=args.dataset_metadata_path,
         repeat=args.dataset_repeat,
-        data_file_keys=args.data_file_keys.split(","),
+        data_file_keys=data_file_keys,
         main_data_operator=UnifiedDataset.default_video_operator(
             base_path=args.dataset_base_path,
             max_pixels=args.max_pixels,
@@ -326,12 +386,20 @@ if __name__ == "__main__":
             fix_frame_rate=args.fix_frame_rate,
             time_division_factor=4 if not args.framewise_decoding else 1,
             time_division_remainder=1 if not args.framewise_decoding else 0,
+            frame_count_stride=args.frame_count_stride,
+            frame_count_remainder=args.frame_count_remainder,
+            frame_count_rounding=args.frame_count_rounding,
+            min_num_frames=args.min_num_frames,
+            max_frame_padding=args.max_frame_padding,
+            log_first_n=args.data_processing_log_samples,
         ),
         special_operator_map={
             "animate_face_video": ToAbsolutePath(args.dataset_base_path) >> LoadVideo(args.num_frames, 4, 1, frame_processor=ImageCropAndResize(512, 512, None, 16, 16)),
-            "input_audio": ToAbsolutePath(args.dataset_base_path) >> LoadAudio(sr=16000),
+            "input_audio": ToAbsolutePath(args.dataset_base_path) >> LoadAudio(sr=args.audio_sample_rate),
             "wantodance_music_path": ToAbsolutePath(args.dataset_base_path),
-        }
+        },
+        post_processor=audio_video_aligner,
+        cache_manifest_required=args.require_cache_manifest,
     )
     model = WanTrainingModule(
         model_paths=args.model_paths,

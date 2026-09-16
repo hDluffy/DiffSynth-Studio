@@ -61,6 +61,21 @@ Examples:
 
   # Start and then follow node1's log.
   bash script/launch_wan22_s2v_multinode.sh --follow
+
+  #cache trainig.
+  NODES="node2 node3" \
+  MASTER_NODE=node2 \
+  LOCAL_NODE=node2 \
+  TRAIN_LAUNCHER=examples/wanvideo/model_training/full/Wan2.2-S2V-14B-multinode-cache-run.sh \
+  ACCELERATE_BIN=/data-training/miniconda/bin/accelerate \
+  MODEL_BASE_PATH=/data-training/models \
+  COMM_IFNAME=bond0 \
+  DATASET_BASE_PATH=/data-training/train_data_5s \
+  DATA_FEATURE_CACHE_PATH=/data-training/train_data_5s/cache_s2v_f81-113_16n1_fps16_v1 \
+  OUTPUT_PATH=./models/train/Wan2.2-S2V-14B_variable_length \
+  LEARNING_RATE=1e-7 \
+  SAVE_STEPS=100 \
+  bash script/launch_wan22_s2v_multinode.sh --follow
 USAGE
 }
 

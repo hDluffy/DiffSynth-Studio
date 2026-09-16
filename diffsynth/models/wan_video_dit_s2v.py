@@ -519,7 +519,13 @@ class WanS2VModel(torch.nn.Module):
             attn_audio_emb = audio_emb
             residual_out = self.audio_injector.injector[audio_attn_id](attn_hidden_states, attn_audio_emb)
             residual_out = rearrange(residual_out, "(b t) n c -> b (t n) c", t=num_frames)
-            hidden_states[:, :original_seq_len] = hidden_states[:, :original_seq_len] + residual_out
+            hidden_states = torch.cat(
+                [
+                    hidden_states[:, :original_seq_len] + residual_out,
+                    hidden_states[:, original_seq_len:],
+                ],
+                dim=1,
+            )
             if use_unified_sequence_parallel:
                 from xfuser.core.distributed import get_sequence_parallel_world_size, get_sequence_parallel_rank
                 hidden_states = torch.chunk(hidden_states, get_sequence_parallel_world_size(), dim=1)[get_sequence_parallel_rank()]
@@ -629,7 +635,9 @@ class WanS2VModel(torch.nn.Module):
                 x, context, t_mod, seq_len_x, pre_compute_freqs[0]
             )
             x = gradient_checkpoint_forward(
-                lambda x: self.after_transformer_block(block_id, x, audio_emb_global, merged_audio_emb, seq_len_x),
+                lambda x, block_id=block_id: self.after_transformer_block(
+                    block_id, x, audio_emb_global, merged_audio_emb, seq_len_x
+                ),
                 use_gradient_checkpointing,
                 use_gradient_checkpointing_offload,
                 x

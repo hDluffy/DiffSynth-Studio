@@ -65,6 +65,7 @@ graph LR;
 * [差分 LoRA 训练](./Training/Differential_LoRA.md)
 * [启用 DeepSpeed](./Training/DeepSpeed.md)
 * [Offload Training](./Training/Offload_Training.md)
+* [Wan2.2-S2V 可变时长训练](./Training/Wan2.2_S2V_Variable_Length.md)
 
 ## Section 4: 模型接入
 

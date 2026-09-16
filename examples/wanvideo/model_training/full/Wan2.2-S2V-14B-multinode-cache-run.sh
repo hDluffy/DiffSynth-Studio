@@ -8,7 +8,7 @@ set -euo pipefail
 NODES="${NODES:-node1 node2}"
 MASTER_ADDR="${MASTER_ADDR:-node1}"
 MASTER_PORT="${MASTER_PORT:-29500}"
-ACCELERATE_BIN="${ACCELERATE_BIN:-/app/miniconda3/bin/accelerate}"
+ACCELERATE_BIN="${ACCELERATE_BIN:-accelerate}"
 CONFIG_FILE="${CONFIG_FILE:-examples/wanvideo/model_training/full/accelerate_config_zero3.yaml}"
 TRAIN_SCRIPT="${TRAIN_SCRIPT:-examples/wanvideo/model_training/train.py}"
 MODEL_BASE_PATH=${MODEL_BASE_PATH:-${DIFFSYNTH_MODEL_BASE_PATH:-./models}}
@@ -24,19 +24,27 @@ DATASET_NUM_WORKERS="${DATASET_NUM_WORKERS:-0}"
 HEIGHT="${HEIGHT:-}"
 WIDTH="${WIDTH:-}"
 MAX_PIXELS="${MAX_PIXELS:-589824}"
-NUM_FRAMES="${NUM_FRAMES:-81}"
+NUM_FRAMES="${NUM_FRAMES:-113}"
+MIN_NUM_FRAMES="${MIN_NUM_FRAMES:-81}"
 FRAME_RATE="${FRAME_RATE:-16}"
 FIX_FRAME_RATE="${FIX_FRAME_RATE:-True}"
+FRAME_COUNT_STRIDE="${FRAME_COUNT_STRIDE:-16}"
+FRAME_COUNT_REMAINDER="${FRAME_COUNT_REMAINDER:-1}"
+FRAME_COUNT_ROUNDING="${FRAME_COUNT_ROUNDING:-nearest}"
+MAX_FRAME_PADDING="${MAX_FRAME_PADDING:-8}"
+AUDIO_SAMPLE_RATE="${AUDIO_SAMPLE_RATE:-16000}"
 
-LEARNING_RATE="${LEARNING_RATE:-1e-5}"
+LEARNING_RATE="${LEARNING_RATE:-1e-7}"
 NUM_EPOCHS="${NUM_EPOCHS:-100}"
-SAVE_STEPS="${SAVE_STEPS:-200}"
+SAVE_STEPS="${SAVE_STEPS:-100}"
 OUTPUT_PATH="${OUTPUT_PATH:-./models/train/Wan2.2-S2V-14B_full}"
+RESUME_FROM_CHECKPOINT="${RESUME_FROM_CHECKPOINT:-}"
+ENABLE_TENSORBOARD_LOG="${ENABLE_TENSORBOARD_LOG:-0}"
 
 if [ -n "${HEIGHT}" ] && [ -n "${WIDTH}" ]; then
-  DATA_FEATURE_SIZE_TAG="${DATA_FEATURE_SIZE_TAG:-${HEIGHT}x${WIDTH}x${NUM_FRAMES}}"
+  DATA_FEATURE_SIZE_TAG="${DATA_FEATURE_SIZE_TAG:-${HEIGHT}x${WIDTH}_f${MIN_NUM_FRAMES}-${NUM_FRAMES}_${FRAME_COUNT_STRIDE}n${FRAME_COUNT_REMAINDER}_fps${FRAME_RATE}}"
 else
-  DATA_FEATURE_SIZE_TAG="${DATA_FEATURE_SIZE_TAG:-max_pixels_${MAX_PIXELS}_frames_${NUM_FRAMES}}"
+  DATA_FEATURE_SIZE_TAG="${DATA_FEATURE_SIZE_TAG:-max_pixels_${MAX_PIXELS}_f${MIN_NUM_FRAMES}-${NUM_FRAMES}_${FRAME_COUNT_STRIDE}n${FRAME_COUNT_REMAINDER}_fps${FRAME_RATE}}"
 fi
 DATA_FEATURE_CACHE_PATH="${DATA_FEATURE_CACHE_PATH:-${DATASET_BASE_PATH}/Wan2.2-S2V-14B_full_${DATA_FEATURE_SIZE_TAG}_features}"
 
@@ -46,7 +54,8 @@ TRAINABLE_MODELS="${TRAINABLE_MODELS:-dit}"
 REMOVE_PREFIX_IN_CKPT="${REMOVE_PREFIX_IN_CKPT:-pipe.dit.}"
 EXTRA_INPUTS="${EXTRA_INPUTS:-input_image,input_audio}"
 USE_GRADIENT_CHECKPOINTING_OFFLOAD="${USE_GRADIENT_CHECKPOINTING_OFFLOAD:-1}"
-S2V_REF_ROPE_MODE="${S2V_REF_ROPE_MODE:-legacy_time_offset}"
+#legacy_time_offset or source_id_local
+S2V_REF_ROPE_MODE="${S2V_REF_ROPE_MODE:-source_id_local}"
 S2V_REF_SOURCE_ID="${S2V_REF_SOURCE_ID:-1.0}"
 S2V_REF_ROPE_THETA="${S2V_REF_ROPE_THETA:-10000.0}"
 S2V_REF_TIME_BASE="${S2V_REF_TIME_BASE:-30}"
@@ -100,8 +109,13 @@ if [ "${NODE_RANK}" -lt 0 ] || [ "${NODE_RANK}" -ge "${NUM_MACHINES}" ]; then
   exit 1
 fi
 
-if [ ! -x "${ACCELERATE_BIN}" ]; then
-  echo "ACCELERATE_BIN=${ACCELERATE_BIN} is not executable. Override ACCELERATE_BIN if needed." >&2
+if [[ "${ACCELERATE_BIN}" == */* ]]; then
+  if [ ! -x "${ACCELERATE_BIN}" ]; then
+    echo "ACCELERATE_BIN=${ACCELERATE_BIN} is not executable. Override ACCELERATE_BIN if needed." >&2
+    exit 1
+  fi
+elif ! command -v "${ACCELERATE_BIN}" >/dev/null 2>&1; then
+  echo "ACCELERATE_BIN=${ACCELERATE_BIN} is not available in PATH." >&2
   exit 1
 fi
 
@@ -130,6 +144,12 @@ SIZE_ARGS=(
   --max_pixels "${MAX_PIXELS}"
   --num_frames "${NUM_FRAMES}"
   --frame_rate "${FRAME_RATE}"
+  --frame_count_stride "${FRAME_COUNT_STRIDE}"
+  --frame_count_remainder "${FRAME_COUNT_REMAINDER}"
+  --frame_count_rounding "${FRAME_COUNT_ROUNDING}"
+  --min_num_frames "${MIN_NUM_FRAMES}"
+  --max_frame_padding "${MAX_FRAME_PADDING}"
+  --audio_sample_rate "${AUDIO_SAMPLE_RATE}"
 )
 if [ -n "${HEIGHT}" ]; then
   SIZE_ARGS+=(--height "${HEIGHT}")
@@ -171,7 +191,8 @@ echo "  total_processes: ${NUM_PROCESSES}"
 echo "  source_dataset_base_path: ${DATASET_BASE_PATH}"
 echo "  feature_cache_path: ${DATA_FEATURE_CACHE_PATH}"
 echo "  max_pixels: ${MAX_PIXELS}"
-echo "  size: ${HEIGHT:-auto}x${WIDTH:-auto}x${NUM_FRAMES}"
+echo "  size: ${HEIGHT:-auto}x${WIDTH:-auto}, frames=${MIN_NUM_FRAMES}-${NUM_FRAMES}"
+echo "  frame_count: ${FRAME_COUNT_STRIDE}n+${FRAME_COUNT_REMAINDER}, rounding=${FRAME_COUNT_ROUNDING}, max_padding=${MAX_FRAME_PADDING}"
 echo "  frame_rate: ${FRAME_RATE}"
 echo "  fix_frame_rate: ${FIX_FRAME_RATE}"
 echo "  nccl_socket_ifname: ${NCCL_SOCKET_IFNAME}"
@@ -180,18 +201,30 @@ echo "  nccl_net: ${NCCL_NET}"
 echo "  nccl_ib_disable: ${NCCL_IB_DISABLE}"
 echo "  nccl_channels: ${NCCL_MIN_NCHANNELS}-${NCCL_MAX_NCHANNELS}"
 echo "  s2v_ref_rope_mode: ${S2V_REF_ROPE_MODE}"
+echo "  resume_from_checkpoint: ${RESUME_FROM_CHECKPOINT:-none}"
+echo "  require_cache_manifest: true"
 echo "  ninja: $(command -v ninja)"
+
+OPTIONAL_TRAIN_ARGS=()
+if [ -n "${RESUME_FROM_CHECKPOINT}" ]; then
+  OPTIONAL_TRAIN_ARGS+=(--resume_from_checkpoint "${RESUME_FROM_CHECKPOINT}")
+fi
+if [ "${ENABLE_TENSORBOARD_LOG}" = "1" ] || [ "${ENABLE_TENSORBOARD_LOG}" = "true" ] || [ "${ENABLE_TENSORBOARD_LOG}" = "True" ]; then
+  OPTIONAL_TRAIN_ARGS+=(--enable_tensorboard_log)
+fi
 
 cmd=(
   "${ACCELERATE_BIN}" launch "${LAUNCH_ARGS[@]}" "${TRAIN_SCRIPT}"
   --dataset_base_path "${DATA_FEATURE_CACHE_PATH}"
   --dataset_repeat "${DATASET_REPEAT}"
   --dataset_num_workers "${DATASET_NUM_WORKERS}"
+  --require_cache_manifest
   "${SIZE_ARGS[@]}"
   "${MODEL_ARGS[@]}"
   --learning_rate "${LEARNING_RATE}"
   --num_epochs "${NUM_EPOCHS}"
   --save_steps "${SAVE_STEPS}"
+  "${OPTIONAL_TRAIN_ARGS[@]}"
   --task sft:train
   --output_path "${OUTPUT_PATH}"
 )

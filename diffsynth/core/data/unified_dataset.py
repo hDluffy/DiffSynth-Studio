@@ -1,6 +1,9 @@
 from .operators import *
-import hashlib, json, os, re
+import hashlib, json, logging, os, re
 import torch, pandas
+
+
+logger = logging.getLogger(__name__)
 
 
 class UnifiedDataset(torch.utils.data.Dataset):
@@ -13,7 +16,9 @@ class UnifiedDataset(torch.utils.data.Dataset):
         data_file_keys=tuple(),
         main_data_operator=lambda x: x,
         special_operator_map=None,
+        post_processor=None,
         max_data_items=None,
+        cache_manifest_required=False,
     ):
         self.base_path = base_path
         self.metadata_path = metadata_path
@@ -22,7 +27,10 @@ class UnifiedDataset(torch.utils.data.Dataset):
         self.main_data_operator = main_data_operator
         self.cached_data_operator = LoadTorchPickle()
         self.special_operator_map = {} if special_operator_map is None else special_operator_map
+        self.post_processor = post_processor
         self.max_data_items = max_data_items
+        self.cache_manifest_required = cache_manifest_required
+        self.cache_manifest = None
         self.data = []
         self.cached_data = []
         self.load_from_cache = metadata_path is None
@@ -59,6 +67,9 @@ class UnifiedDataset(torch.utils.data.Dataset):
         height_division_factor=16, width_division_factor=16,
         num_frames=81, time_division_factor=4, time_division_remainder=1,
         frame_rate=24, fix_frame_rate=False,
+        frame_count_stride=None, frame_count_remainder=None,
+        frame_count_rounding="floor", min_num_frames=1,
+        max_frame_padding=None, log_first_n=0,
     ):
         return RouteByType(operator_map=[
             (str, ToAbsolutePath(base_path) >> RouteByExtensionName(operator_map=[
@@ -71,6 +82,12 @@ class UnifiedDataset(torch.utils.data.Dataset):
                     num_frames, time_division_factor, time_division_remainder,
                     frame_processor=ImageCropAndResize(height, width, max_pixels, height_division_factor, width_division_factor),
                     frame_rate=frame_rate, fix_frame_rate=fix_frame_rate,
+                    frame_count_stride=frame_count_stride,
+                    frame_count_remainder=frame_count_remainder,
+                    frame_count_rounding=frame_count_rounding,
+                    min_num_frames=min_num_frames,
+                    max_frame_padding=max_frame_padding,
+                    log_first_n=log_first_n,
                 )),
             ])),
         ])
@@ -86,8 +103,32 @@ class UnifiedDataset(torch.utils.data.Dataset):
     def load_metadata(self, metadata_path):
         if metadata_path is None:
             print("No metadata_path. Searching for cached data files.")
+            manifest_path = os.path.join(self.base_path, "_cache_manifest.json")
+            if os.path.isfile(manifest_path):
+                with open(manifest_path, "r") as f:
+                    self.cache_manifest = json.load(f)
+                if self.cache_manifest.get("status") != "complete":
+                    raise RuntimeError(
+                        f"Feature cache is not complete: {manifest_path} has "
+                        f"status={self.cache_manifest.get('status')!r}."
+                    )
+            elif self.cache_manifest_required:
+                raise FileNotFoundError(
+                    f"Required feature-cache manifest does not exist: {manifest_path}."
+                )
+            else:
+                logger.warning("Feature cache has no manifest: %s", manifest_path)
             self.search_for_cached_data_files(self.base_path)
             self.cached_data = sorted(self.cached_data)
+            if not self.cached_data:
+                raise RuntimeError(f"No .pth feature-cache files found under {self.base_path}.")
+            if self.cache_manifest is not None:
+                expected_files = self.cache_manifest.get("cached_files")
+                if expected_files is not None and expected_files != len(self.cached_data):
+                    raise RuntimeError(
+                        f"Feature-cache file count mismatch: manifest={expected_files}, "
+                        f"found={len(self.cached_data)} under {self.base_path}."
+                    )
             print(f"{len(self.cached_data)} cached data files found.")
         elif metadata_path.endswith(".json"):
             with open(metadata_path, "r") as f:
@@ -181,6 +222,8 @@ class UnifiedDataset(torch.utils.data.Dataset):
                         data[key] = self.special_operator_map[key](data[key])
                     elif key in self.data_file_keys:
                         data[key] = self.main_data_operator(data[key])
+            if self.post_processor is not None:
+                data = self.post_processor(data)
         return data
 
     def __len__(self):

@@ -872,7 +872,7 @@ class WanVideoUnit_S2V(PipelineUnit):
         super().__init__(
             take_over=True,
             onload_model_names=("audio_encoder", "vae",),
-            input_params=("input_audio", "audio_embeds", "num_frames", "height", "width", "tiled", "tile_size", "tile_stride", "audio_sample_rate", "s2v_pose_video", "s2v_pose_latents", "motion_video"),
+            input_params=("input_audio", "audio_embeds", "num_frames", "height", "width", "tiled", "tile_size", "tile_stride", "audio_sample_rate", "video_frame_rate", "s2v_pose_video", "s2v_pose_latents", "motion_video"),
             output_params=("audio_embeds", "motion_latents", "drop_motion_frames", "s2v_pose_latents"),
         )
 
@@ -929,9 +929,10 @@ class WanVideoUnit_S2V(PipelineUnit):
             return inputs_shared, inputs_posi, inputs_nega
         num_frames, height, width, tiled, tile_size, tile_stride = inputs_shared.get("num_frames"), inputs_shared.get("height"), inputs_shared.get("width"), inputs_shared.get("tiled"), inputs_shared.get("tile_size"), inputs_shared.get("tile_stride")
         input_audio, audio_embeds, audio_sample_rate = inputs_shared.pop("input_audio", None), inputs_shared.pop("audio_embeds", None), inputs_shared.get("audio_sample_rate", 16000)
+        video_frame_rate = inputs_shared.get("video_frame_rate", 16)
         s2v_pose_video, s2v_pose_latents, motion_video = inputs_shared.pop("s2v_pose_video", None), inputs_shared.pop("s2v_pose_latents", None), inputs_shared.pop("motion_video", None)
 
-        audio_input_positive = self.process_audio(pipe, input_audio, audio_sample_rate, num_frames, audio_embeds=audio_embeds)
+        audio_input_positive = self.process_audio(pipe, input_audio, audio_sample_rate, num_frames, fps=video_frame_rate, audio_embeds=audio_embeds)
         inputs_posi.update(audio_input_positive)
         inputs_nega.update({"audio_embeds": 0.0 * audio_input_positive["audio_embeds"]})
 
@@ -1731,7 +1732,7 @@ def model_fn_wans2v(
                 x, context, t_mod, seq_len_x, pre_compute_freqs[0]
             )
         x = gradient_checkpoint_forward(
-            lambda x: dit.after_transformer_block(block_id, x, audio_emb_global, merged_audio_emb, seq_len_x),
+            lambda x, block_id=block_id: dit.after_transformer_block(block_id, x, audio_emb_global, merged_audio_emb, seq_len_x),
             use_gradient_checkpointing,
             use_gradient_checkpointing_offload,
             x

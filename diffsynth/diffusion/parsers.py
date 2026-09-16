@@ -1,12 +1,25 @@
 import argparse
 
 
+def parse_bool(value):
+    if isinstance(value, bool):
+        return value
+    value = value.lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    raise argparse.ArgumentTypeError(f"Expected a boolean value, got {value!r}.")
+
+
 def add_dataset_base_config(parser: argparse.ArgumentParser):
     parser.add_argument("--dataset_base_path", type=str, default="", required=True, help="Base path of the dataset.")
     parser.add_argument("--dataset_metadata_path", type=str, default=None, help="Path to the metadata file of the dataset.")
     parser.add_argument("--dataset_repeat", type=int, default=1, help="Number of times to repeat the dataset per epoch.")
     parser.add_argument("--dataset_num_workers", type=int, default=0, help="Number of workers for data loading.")
     parser.add_argument("--data_file_keys", type=str, default="image,video", help="Data file keys in the metadata. Comma-separated.")
+    parser.add_argument("--require_cache_manifest", default=False, action="store_true", help="Require a complete feature-cache manifest when training from cached data.")
+    parser.add_argument("--resume_feature_cache", default=False, action="store_true", help="Resume an interrupted feature-cache build after validating its configuration fingerprint.")
     return parser
 
 def add_image_size_config(parser: argparse.ArgumentParser):
@@ -19,9 +32,20 @@ def add_video_size_config(parser: argparse.ArgumentParser):
     parser.add_argument("--height", type=int, default=None, help="Height of images. Leave `height` and `width` empty to enable dynamic resolution.")
     parser.add_argument("--width", type=int, default=None, help="Width of images. Leave `height` and `width` empty to enable dynamic resolution.")
     parser.add_argument("--max_pixels", type=int, default=1024*1024, help="Maximum number of pixels per frame, used for dynamic resolution.")
-    parser.add_argument("--num_frames", type=int, default=81, help="Number of frames per video. Frames are sampled from the video prefix.")
-    parser.add_argument("--frame_rate", type=int, default=24, help="Frame rate of the video.")
-    parser.add_argument("--fix_frame_rate", type=bool, default=False, help="Whether to fix the frame rate of the video.")
+    parser.add_argument("--num_frames", type=int, default=81, help="Maximum sampled frames per video. Frames are sampled from the video prefix.")
+    parser.add_argument("--frame_rate", type=int, default=24, help="Target video frame rate.")
+    parser.add_argument("--fix_frame_rate", type=parse_bool, default=False, help="Whether to resample videos to --frame_rate.")
+    parser.add_argument("--frame_count_stride", type=int, default=None, help="Valid frame counts follow stride*n+remainder. Defaults to the model temporal factor.")
+    parser.add_argument("--frame_count_remainder", type=int, default=None, help="Remainder for valid frame counts. Defaults to the model temporal remainder.")
+    parser.add_argument("--frame_count_rounding", choices=("floor", "nearest", "ceil"), default="floor", help="How to map the available frame count to a valid frame count.")
+    parser.add_argument("--min_num_frames", type=int, default=1, help="Minimum sampled frame count before alignment to the configured stride.")
+    parser.add_argument("--max_frame_padding", type=int, default=None, help="Maximum number of repeated tail frames allowed when rounding upward.")
+    parser.add_argument("--audio_sample_rate", type=int, default=16000, help="Audio sample rate used by dataset loading and audio/video alignment.")
+    parser.add_argument("--audio_duration_policy", choices=("strict", "trim_pad"), default="trim_pad", help="Strictly validate or trim/pad audio to the sampled video duration.")
+    parser.add_argument("--audio_duration_tolerance_seconds", type=float, default=0.05, help="Maximum correction allowed by strict audio-duration validation.")
+    parser.add_argument("--max_audio_padding_seconds", type=float, default=0.5, help="Maximum zero padding allowed for short audio. Use a negative value to disable the limit.")
+    parser.add_argument("--max_audio_trimming_seconds", type=float, default=None, help="Maximum prefix-tail trimming allowed for long audio. Defaults to unlimited.")
+    parser.add_argument("--data_processing_log_samples", type=int, default=8, help="Number of per-process sampling/alignment decisions logged for diagnostics.")
     return parser
 
 def add_model_config(parser: argparse.ArgumentParser):
