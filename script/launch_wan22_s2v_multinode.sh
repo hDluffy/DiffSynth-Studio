@@ -47,35 +47,23 @@ Options:
 Environment variables:
   NODES, MASTER_NODE/MASTER_ADDR, LOCAL_NODE, REMOTE_DIR, TRAIN_LAUNCHER,
   TRAIN_LOG, SSH_USER, SSH_PORT, SSH_OPTIONS, MASTER_PORT, GPUS_PER_NODE,
-  NUM_MACHINES and other variables consumed by the training launcher.
+  NUM_MACHINES, RESUME_FROM_CHECKPOINT and other variables consumed by the
+  training launcher.
 
 Examples:
-  # Execute on node1; node2 is started over SSH.
-  NODES="node1 node2" MASTER_NODE=node1 \
-    bash script/launch_wan22_s2v_multinode.sh
+  # 1. Precompute variable-length features on one 8-GPU node.
+  bash script/run_wan22_s2v_build_cache.sh
 
-  # Four nodes, custom SSH user and port.
-  NODES="node1 node2 node3 node4" MASTER_NODE=node1 \
-    SSH_USER=training SSH_PORT=2222 \
-    bash script/launch_wan22_s2v_multinode.sh
+  # Resume an interrupted cache build with exactly the same configuration.
+  RESUME_FEATURE_CACHE=1 bash script/run_wan22_s2v_build_cache.sh
 
-  # Start and then follow node1's log.
-  bash script/launch_wan22_s2v_multinode.sh --follow
+  # 2. Train from a complete feature cache on node2/node3 (16 GPUs).
+  RESUME_FROM_CHECKPOINT=/path/to/checkpoint.safetensors \
+    bash script/run_wan22_s2v_train_cache_multinode.sh --follow
 
-  #cache trainig.
-  NODES="node2 node3" \
-  MASTER_NODE=node2 \
-  LOCAL_NODE=node2 \
-  TRAIN_LAUNCHER=examples/wanvideo/model_training/full/Wan2.2-S2V-14B-multinode-cache-run.sh \
-  ACCELERATE_BIN=/data-training/miniconda/bin/accelerate \
-  MODEL_BASE_PATH=/data-training/models \
-  COMM_IFNAME=bond0 \
-  DATASET_BASE_PATH=/data-training/train_data_5s \
-  DATA_FEATURE_CACHE_PATH=/data-training/train_data_5s/cache_s2v_f81-113_16n1_fps16_v1 \
-  OUTPUT_PATH=./models/train/Wan2.2-S2V-14B_variable_length \
-  LEARNING_RATE=1e-7 \
-  SAVE_STEPS=100 \
-  bash script/launch_wan22_s2v_multinode.sh --follow
+  # 3. Train directly from raw data with a fixed frame count on 16 GPUs.
+  DATASET_METADATA_PATH=/data-training/train_data_5s/metadata_32.csv \
+    bash script/run_wan22_s2v_train_raw_multinode.sh --follow
 USAGE
 }
 
@@ -212,7 +200,7 @@ for i in "${!node_list[@]}"; do
 done
 [[ -n "${master_index}" ]] || die "MASTER_NODE='${MASTER_NODE_VALUE}' is not present in NODES='${NODES_VALUE}'."
 [[ -n "${local_index}" ]] || die "LOCAL_NODE='${LOCAL_NODE_VALUE}' is not present in NODES='${NODES_VALUE}'."
-(( master_index == local_index )) || echo "Warning: LOCAL_NODE=${LOCAL_NODE_VALUE} is not MASTER_NODE=${MASTER_NODE_VALUE}." >&2
+(( master_index == local_index )) || die "Run this launcher on MASTER_NODE=${MASTER_NODE_VALUE}; LOCAL_NODE=${LOCAL_NODE_VALUE}."
 (( num_machines >= ${#node_list[@]} )) || die "NUM_MACHINES is smaller than the number of hosts in NODES."
 
 if [[ "${TRAIN_LAUNCHER_VALUE}" = /* ]]; then
@@ -239,19 +227,37 @@ remote_host() {
   fi
 }
 
+# Keep this list centralized so local and SSH-launched nodes receive exactly
+# the same optional training configuration.
+FORWARDED_VARIABLES=(
+  GPUS_PER_NODE NUM_PROCESSES ACCELERATE_BIN CONFIG_FILE DATA_PROCESS_CONFIG_FILE
+  TRAIN_SCRIPT MODEL_BASE_PATH
+  COMM_IFNAME NCCL_SOCKET_IFNAME GLOO_SOCKET_IFNAME NCCL_IB_DISABLE NCCL_IB_HCA NCCL_NET
+  NCCL_MIN_NCHANNELS NCCL_MAX_NCHANNELS PYTORCH_CUDA_ALLOC_CONF
+  DATASET_BASE_PATH DATASET_METADATA_PATH DATA_FEATURE_CACHE_PATH DATA_FEATURE_SIZE_TAG
+  DATA_FILE_KEYS DATASET_REPEAT DATASET_NUM_WORKERS
+  HEIGHT WIDTH MAX_PIXELS NUM_FRAMES MIN_NUM_FRAMES FRAME_RATE FIX_FRAME_RATE
+  FRAME_COUNT_STRIDE FRAME_COUNT_REMAINDER FRAME_COUNT_ROUNDING MAX_FRAME_PADDING
+  AUDIO_SAMPLE_RATE AUDIO_DURATION_POLICY AUDIO_DURATION_TOLERANCE_SECONDS
+  MAX_AUDIO_PADDING_SECONDS MAX_AUDIO_TRIMMING_SECONDS DATA_PROCESSING_LOG_SAMPLES
+  TILED TILE_SIZE TILE_STRIDE
+  DIT_MODEL_ID_WITH_ORIGIN_PATH MODEL_ID_WITH_ORIGIN_PATHS AUDIO_PROCESSOR_PATH
+  TRAINABLE_MODELS REMOVE_PREFIX_IN_CKPT EXTRA_INPUTS OFFLOAD_MODELS FP8_MODELS
+  LEARNING_RATE NUM_EPOCHS SAVE_STEPS OUTPUT_PATH RESUME_FROM_CHECKPOINT
+  RESUME_FEATURE_CACHE ENABLE_TENSORBOARD_LOG USE_GRADIENT_CHECKPOINTING_OFFLOAD
+  S2V_REF_ROPE_MODE S2V_REF_SOURCE_ID S2V_REF_ROPE_THETA S2V_REF_TIME_BASE
+  S2V_REF_TIME_MARGIN
+)
+
 # Include distributed settings and common launcher overrides when they are
-# present on the master. This keeps GPUS_PER_NODE/MASTER_PORT overrides in sync.
+# present on the master.
 remote_env=(
   "NODES=$(shell_quote "${NODES_VALUE}")"
   "NUM_MACHINES=$(shell_quote "${num_machines}")"
   "MASTER_ADDR=$(shell_quote "${MASTER_NODE_VALUE}")"
   "MASTER_PORT=$(shell_quote "${MASTER_PORT:-29500}")"
 )
-for variable in GPUS_PER_NODE ACCELERATE_BIN CONFIG_FILE TRAIN_SCRIPT MODEL_BASE_PATH \
-  COMM_IFNAME NCCL_SOCKET_IFNAME GLOO_SOCKET_IFNAME NCCL_IB_DISABLE NCCL_IB_HCA NCCL_NET \
-  NCCL_MIN_NCHANNELS NCCL_MAX_NCHANNELS DATASET_BASE_PATH DATA_FEATURE_CACHE_PATH \
-  OUTPUT_PATH DATASET_REPEAT DATASET_NUM_WORKERS HEIGHT WIDTH MAX_PIXELS NUM_FRAMES \
-  FRAME_RATE FIX_FRAME_RATE LEARNING_RATE NUM_EPOCHS SAVE_STEPS; do
+for variable in "${FORWARDED_VARIABLES[@]}"; do
   if [[ -n "${!variable+x}" ]]; then
     remote_env+=("${variable}=$(shell_quote "${!variable}")")
   fi
@@ -271,11 +277,7 @@ start_node() {
     env_string+="${item} "
   done
   env_string+="NODE_RANK=$(shell_quote "${rank}")"
-  for variable in GPUS_PER_NODE ACCELERATE_BIN CONFIG_FILE TRAIN_SCRIPT MODEL_BASE_PATH \
-    COMM_IFNAME NCCL_SOCKET_IFNAME GLOO_SOCKET_IFNAME NCCL_IB_DISABLE NCCL_IB_HCA NCCL_NET \
-    NCCL_MIN_NCHANNELS NCCL_MAX_NCHANNELS DATASET_BASE_PATH DATA_FEATURE_CACHE_PATH \
-    OUTPUT_PATH DATASET_REPEAT DATASET_NUM_WORKERS HEIGHT WIDTH MAX_PIXELS NUM_FRAMES \
-    FRAME_RATE FIX_FRAME_RATE LEARNING_RATE NUM_EPOCHS SAVE_STEPS; do
+  for variable in "${FORWARDED_VARIABLES[@]}"; do
     if [[ -n "${!variable+x}" ]]; then
       env_args+=("${variable}=${!variable}")
     fi
@@ -313,6 +315,27 @@ if [[ "${DRY_RUN}" -eq 0 ]] && ! command -v ssh >/dev/null 2>&1; then
   die "ssh is required when not using --dry-run."
 fi
 
+master_port_is_listening() {
+  command -v ss >/dev/null 2>&1 &&
+    [[ -n "$(ss -H -ltn "sport = :${MASTER_PORT:-29500}" 2>/dev/null)" ]]
+}
+
+wait_for_master_port() {
+  if ! command -v ss >/dev/null 2>&1; then
+    sleep 2
+    return
+  fi
+  local attempt
+  for attempt in {1..30}; do
+    if master_port_is_listening; then
+      echo "Master rendezvous is listening on port ${MASTER_PORT:-29500}."
+      return
+    fi
+    sleep 1
+  done
+  die "Master rendezvous did not listen on port ${MASTER_PORT:-29500} within 30 seconds. Check ${LOG_FILE_VALUE}."
+}
+
 echo "Wan2.2-S2V-14B multinode launch"
 echo "  nodes: ${NODES_VALUE}"
 echo "  master: ${MASTER_NODE_VALUE} (rank ${master_index})"
@@ -320,12 +343,21 @@ echo "  local: ${LOCAL_NODE_VALUE} (rank ${local_index})"
 echo "  launcher: ${launcher_path}"
 echo "  log: ${LOG_FILE_VALUE}"
 
-# Start remote workers first, then the local/master process.
+# Refuse to connect a new run to a stale torch-elastic rendezvous.
+if [[ "${DRY_RUN}" -eq 0 ]] && master_port_is_listening; then
+  die "MASTER_PORT=${MASTER_PORT:-29500} is already in use. Stop the previous run or choose another port."
+fi
+
+# Start the local master first. Once its rendezvous socket is ready, start all
+# remote workers so they cannot accidentally connect to a stale/previous run.
+start_node "${node_list[$local_index]}" "${local_index}" "$(remote_host "${node_list[$local_index]}")"
+if [[ "${DRY_RUN}" -eq 0 ]]; then
+  wait_for_master_port
+fi
 for i in "${!node_list[@]}"; do
   [[ "${i}" -eq "${local_index}" ]] && continue
   start_node "${node_list[$i]}" "${i}" "$(remote_host "${node_list[$i]}")"
 done
-start_node "${node_list[$local_index]}" "${local_index}" "$(remote_host "${node_list[$local_index]}")"
 
 echo "All node launch commands completed. Logs are written to '${LOG_FILE_VALUE}' on each node."
 if [[ "${FOLLOW_LOG}" -eq 1 && "${DRY_RUN}" -eq 0 ]]; then
