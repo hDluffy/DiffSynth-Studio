@@ -269,10 +269,17 @@ if [[ "${local_log_path}" != /* ]]; then
 fi
 
 start_node() {
-  local host="$1" rank="$2" remote="$3" command_string
+  local host="$1" rank="$2" remote="$3" command_string node_log
   local env_string=""
   local env_args=("NODES=${NODES_VALUE}" "NUM_MACHINES=${num_machines}"
     "MASTER_ADDR=${MASTER_NODE_VALUE}" "MASTER_PORT=${MASTER_PORT:-29500}" "NODE_RANK=${rank}")
+  node_log="${LOG_FILE_VALUE}"
+  if [[ "${host}" != "${LOCAL_NODE_VALUE}" ]]; then
+    # Repository paths are often shared across nodes. Distinct files prevent
+    # concurrent shell redirections from corrupting the log with sparse/NUL
+    # regions while preserving the requested name for the local master log.
+    node_log="${LOG_FILE_VALUE}.rank${rank}"
+  fi
   for item in "${remote_env[@]}"; do
     env_string+="${item} "
   done
@@ -283,9 +290,9 @@ start_node() {
     fi
   done
 
-  command_string="cd $(shell_quote "${REMOTE_DIR_VALUE}") && mkdir -p $(shell_quote "$(dirname -- "${LOG_FILE_VALUE}")") && ${env_string} nohup bash $(shell_quote "${launcher_path}") > $(shell_quote "${LOG_FILE_VALUE}") 2>&1 < /dev/null &"
+  command_string="cd $(shell_quote "${REMOTE_DIR_VALUE}") && mkdir -p $(shell_quote "$(dirname -- "${node_log}")") && ${env_string} nohup bash $(shell_quote "${launcher_path}") > $(shell_quote "${node_log}") 2>&1 < /dev/null &"
 
-  echo "[${host}] starting rank ${rank}"
+  echo "[${host}] starting rank ${rank}; log=${node_log}"
   if [[ "${DRY_RUN}" -eq 1 ]]; then
     if [[ "${host}" == "${LOCAL_NODE_VALUE}" ]]; then
       echo "  local: ${command_string}"
@@ -298,8 +305,8 @@ start_node() {
   if [[ "${host}" == "${LOCAL_NODE_VALUE}" ]]; then
     (
       cd "${REMOTE_DIR_VALUE}"
-      mkdir -p "$(dirname -- "${LOG_FILE_VALUE}")"
-      env "${env_args[@]}" nohup bash "${launcher_path}" > "${LOG_FILE_VALUE}" 2>&1 < /dev/null &
+      mkdir -p "$(dirname -- "${node_log}")"
+      env "${env_args[@]}" nohup bash "${launcher_path}" > "${node_log}" 2>&1 < /dev/null &
       train_pid=$!
       echo "TRAIN_PID=${train_pid}"
     )
@@ -359,7 +366,7 @@ for i in "${!node_list[@]}"; do
   start_node "${node_list[$i]}" "${i}" "$(remote_host "${node_list[$i]}")"
 done
 
-echo "All node launch commands completed. Logs are written to '${LOG_FILE_VALUE}' on each node."
+echo "All node launch commands completed. The master log is '${LOG_FILE_VALUE}'; remote logs use '${LOG_FILE_VALUE}.rank<N>'."
 if [[ "${FOLLOW_LOG}" -eq 1 && "${DRY_RUN}" -eq 0 ]]; then
   exec tail -F "${local_log_path}"
 fi

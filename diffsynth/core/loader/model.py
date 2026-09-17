@@ -1,11 +1,49 @@
 from ..vram.initialization import skip_model_initialization
 from ..vram.disk_map import DiskMap
 from ..vram.layers import enable_vram_management
-from .file import load_state_dict
+from .file import load_state_dict, release_cpu_memory
 import torch
 from contextlib import contextmanager
 from transformers.integrations import is_deepspeed_zero3_enabled
 from transformers.utils import ContextManagers
+
+
+def _distributed_rank():
+    if not torch.distributed.is_available() or not torch.distributed.is_initialized():
+        return None
+    return torch.distributed.get_rank()
+
+
+def load_state_dict_for_zero3(model, path, torch_dtype=None, device="cpu", key_prefix=None):
+    """Load tensors only on rank 0 while preserving keys on every ZeRO-3 rank."""
+    rank = _distributed_rank()
+    prefix = "" if key_prefix is None else key_prefix
+    if rank is None:
+        state_dict = load_state_dict(path, torch_dtype=torch_dtype, device=device)
+        if prefix:
+            state_dict = {prefix + key: value for key, value in state_dict.items()}
+        return state_dict
+
+    lazy_state_dict = DiskMap(path, device, torch_dtype=torch_dtype)
+    raw_keys = list(lazy_state_dict)
+    buffer_keys = set(dict(model.named_buffers()).keys())
+    state_dict = {}
+    for raw_key in raw_keys:
+        model_key = prefix + raw_key
+        if rank == 0 or model_key in buffer_keys:
+            state_dict[model_key] = lazy_state_dict[raw_key]
+        else:
+            # All ranks need identical keys to enter the same collectives.
+            # Transformers dereferences parameter values only on global rank 0.
+            state_dict[model_key] = None
+
+    del lazy_state_dict
+    if rank == 0:
+        print(
+            f"ZeRO-3 memory-efficient checkpoint load: rank 0 materialized "
+            f"{len(state_dict)} tensors; other ranks loaded key metadata only."
+        )
+    return state_dict
 
 
 def load_model(model_class, path, config=None, torch_dtype=torch.bfloat16, device="cpu", state_dict_converter=None, use_disk_map=False, module_map=None, vram_config=None, vram_limit=None, state_dict=None):
@@ -37,6 +75,10 @@ def load_model(model_class, path, config=None, torch_dtype=torch.bfloat16, devic
         # avoiding the need to load all parameters in the file.
         if state_dict is not None:
             pass
+        elif is_deepspeed_zero3_enabled() and state_dict_converter is None:
+            state_dict = load_state_dict_for_zero3(
+                model, path, torch_dtype=torch_dtype, device="cpu"
+            )
         elif use_disk_map:
             state_dict = DiskMap(path, device, torch_dtype=torch_dtype)
         else:
@@ -51,11 +93,15 @@ def load_model(model_class, path, config=None, torch_dtype=torch.bfloat16, devic
         # Why does DeepSpeed ZeRO Stage 3 need to be handled separately?
         # Because at this stage, model parameters are partitioned across multiple GPUs.
         # Loading them directly could lead to excessive GPU memory consumption.
-        if is_deepspeed_zero3_enabled():
-            from transformers.integrations.deepspeed import _load_state_dict_into_zero3_model
-            _load_state_dict_into_zero3_model(model, state_dict)
-        else:
-            model.load_state_dict(state_dict, assign=True)
+        try:
+            if is_deepspeed_zero3_enabled():
+                from transformers.integrations.deepspeed import _load_state_dict_into_zero3_model
+                _load_state_dict_into_zero3_model(model, state_dict)
+            else:
+                model.load_state_dict(state_dict, assign=True)
+        finally:
+            del state_dict
+            release_cpu_memory()
         # Why do we call `to()`?
         # Because some models override the behavior of `to()`,
         # especially those from libraries like Transformers.

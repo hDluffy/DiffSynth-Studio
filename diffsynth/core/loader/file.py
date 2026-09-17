@@ -1,5 +1,6 @@
 from safetensors import safe_open
-import torch, hashlib
+import ctypes, gc, hashlib, sys
+import torch
 
 
 def load_state_dict(file_path, torch_dtype=None, device="cpu", pin_memory=False, verbose=0):
@@ -47,6 +48,20 @@ def load_state_dict_from_bin(file_path, torch_dtype=None, device="cpu"):
             if isinstance(state_dict[i], torch.Tensor):
                 state_dict[i] = state_dict[i].to(torch_dtype)
     return state_dict
+
+
+def release_cpu_memory():
+    """Release temporary checkpoint memory as eagerly as possible."""
+    gc.collect()
+    if not sys.platform.startswith("linux"):
+        return
+    try:
+        malloc_trim = ctypes.CDLL(None).malloc_trim
+        malloc_trim.argtypes = [ctypes.c_size_t]
+        malloc_trim.restype = ctypes.c_int
+        malloc_trim(0)
+    except (AttributeError, OSError):
+        pass
 
 
 def convert_state_dict_keys_to_single_str(state_dict, with_shape=True):

@@ -1,4 +1,4 @@
-import hashlib, importlib, json, os
+import hashlib, importlib, json, os, socket
 from collections import Counter
 
 import torch
@@ -22,6 +22,38 @@ _CACHE_CONFIG_KEYS = (
     "tiled", "tile_size", "tile_stride", "fp8_models", "offload_models",
     "task",
 )
+
+
+def _process_memory_mib():
+    values = {}
+    try:
+        with open("/proc/self/status", "r") as status_file:
+            for line in status_file:
+                key, _, value = line.partition(":")
+                if key in {"VmRSS", "VmHWM"}:
+                    values[key] = int(value.strip().split()[0]) / 1024
+    except (FileNotFoundError, OSError, ValueError):
+        pass
+    return values
+
+
+def _log_memory_snapshot(accelerator, phase):
+    process_memory = _process_memory_mib()
+    cuda_allocated = 0.0
+    cuda_reserved = 0.0
+    if torch.cuda.is_available() and accelerator.device.type == "cuda":
+        cuda_allocated = torch.cuda.memory_allocated(accelerator.device) / (1024 ** 2)
+        cuda_reserved = torch.cuda.memory_reserved(accelerator.device) / (1024 ** 2)
+    print(
+        "Memory snapshot: "
+        f"phase={phase}, host={socket.gethostname()}, "
+        f"rank={accelerator.process_index}, local_rank={accelerator.local_process_index}, "
+        f"cpu_rss_mib={process_memory.get('VmRSS', -1):.1f}, "
+        f"cpu_hwm_mib={process_memory.get('VmHWM', -1):.1f}, "
+        f"cuda_allocated_mib={cuda_allocated:.1f}, "
+        f"cuda_reserved_mib={cuda_reserved:.1f}",
+        flush=True,
+    )
 
 
 def _json_safe(value):
@@ -125,34 +157,51 @@ def launch_training_task(
         cpu_offload_split_threshold = args.cpu_offload_split_threshold
         customized_optimizer = args.customized_optimizer
 
+    _log_memory_snapshot(accelerator, "training_entry")
     optimizer_class = get_optimizer_class(customized_optimizer)
     optimizer = optimizer_class(model.trainable_modules(), lr=learning_rate, weight_decay=weight_decay)
     scheduler = torch.optim.lr_scheduler.ConstantLR(optimizer)
     dataloader = torch.utils.data.DataLoader(dataset, shuffle=True, collate_fn=lambda x: x[0], num_workers=num_workers)
+    _log_memory_snapshot(accelerator, "optimizer_and_dataloader_created")
 
     if enable_model_cpu_offload:
+        _log_memory_snapshot(accelerator, "before_accelerator_prepare")
         optimizer, dataloader, scheduler = accelerator.prepare(optimizer, dataloader, scheduler)
+        _log_memory_snapshot(accelerator, "after_accelerator_prepare")
         model.pipe.device = accelerator.device
         offload_manager = OffloadTrainingManager(model, accelerator.device, enable_optimizer_cpu_offload, cpu_offload_split_threshold)
     else:
+        _log_memory_snapshot(accelerator, "before_model_to_device")
         model.to(device=accelerator.device)
+        _log_memory_snapshot(accelerator, "after_model_to_device")
         model, optimizer, dataloader, scheduler = accelerator.prepare(model, optimizer, dataloader, scheduler)
+        _log_memory_snapshot(accelerator, "after_accelerator_prepare")
 
     initialize_deepspeed_gradient_checkpointing(accelerator)
+    first_step = True
     for epoch_id in range(num_epochs):
         for data in tqdm(dataloader):
+            if first_step:
+                _log_memory_snapshot(accelerator, "first_step_data_loaded")
             with accelerator.accumulate(model):
                 if dataset.load_from_cache:
                     loss = model({}, inputs=data)
                 else:
                     loss = model(data)
+                if first_step:
+                    _log_memory_snapshot(accelerator, "first_step_after_forward")
                 accelerator.backward(loss)
+                if first_step:
+                    _log_memory_snapshot(accelerator, "first_step_after_backward")
                 if enable_model_cpu_offload:
                     offload_manager.after_backward()
                 optimizer.step()
+                if first_step:
+                    _log_memory_snapshot(accelerator, "first_step_after_optimizer_step")
                 scheduler.step()
                 optimizer.zero_grad()
                 model_logger.on_step_end(accelerator, model, save_steps, loss=loss)
+            first_step = False
         if save_steps is None:
             model_logger.on_epoch_end(accelerator, model, epoch_id)
 

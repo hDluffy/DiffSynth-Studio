@@ -1,5 +1,5 @@
 import torch, json, os, inspect
-from ..core import ModelConfig, load_state_dict
+from ..core import ModelConfig, load_state_dict, load_state_dict_for_zero3, release_cpu_memory
 from ..utils.controlnet import ControlNetInput
 from .base_pipeline import PipelineUnit
 from peft import LoraConfig, inject_adapter_in_model
@@ -368,22 +368,37 @@ class DiffusionTrainingModule(torch.nn.Module):
     def resume_from_checkpoint(self, path, remove_prefix_in_ckpt):
         if path is None:
             return
-        state_dict = load_state_dict(path)
-        if remove_prefix_in_ckpt is not None:
-            state_dict = {remove_prefix_in_ckpt + i: state_dict[i] for i in state_dict}
         from transformers.integrations import is_deepspeed_zero3_enabled
-        if is_deepspeed_zero3_enabled():
-            model_keys = set(self.state_dict().keys())
-            unexpected_keys = [key for key in state_dict if key not in model_keys]
-            if len(unexpected_keys) != 0:
-                raise ValueError(f"Cannot load checkpoint: {path}. {len(unexpected_keys)} keys are unexpected.")
-            from transformers.integrations.deepspeed import _load_state_dict_into_zero3_model
-            error_msgs, missing_keys = _load_state_dict_into_zero3_model(self, state_dict)
-            if len(error_msgs) != 0:
-                error_msg = "; ".join(error_msgs)
-                raise RuntimeError(f"Cannot load checkpoint: {path}. {error_msg}")
+        zero3_enabled = is_deepspeed_zero3_enabled()
+        if zero3_enabled:
+            state_dict = load_state_dict_for_zero3(
+                self, path, key_prefix=remove_prefix_in_ckpt
+            )
         else:
-            missing_keys, unexpected_keys = self.load_state_dict(state_dict, strict=False)
-            if len(unexpected_keys) != 0:
-                raise ValueError(f"Cannot load checkpoint: {path}. {len(unexpected_keys)} keys are unexpected.")
-        print(f"Loaded checkpoint from {path}. {len(state_dict)} keys are available.")
+            state_dict = load_state_dict(path)
+            if remove_prefix_in_ckpt is not None:
+                state_dict = {remove_prefix_in_ckpt + i: state_dict[i] for i in state_dict}
+
+        checkpoint_key_count = len(state_dict)
+        try:
+            if zero3_enabled:
+                model_keys = set(self.state_dict().keys())
+                unexpected_keys = [key for key in state_dict if key not in model_keys]
+                if len(unexpected_keys) != 0:
+                    raise ValueError(f"Cannot load checkpoint: {path}. {len(unexpected_keys)} keys are unexpected.")
+                from transformers.integrations.deepspeed import _load_state_dict_into_zero3_model
+                error_msgs, missing_keys = _load_state_dict_into_zero3_model(self, state_dict)
+                if len(error_msgs) != 0:
+                    error_msg = "; ".join(error_msgs)
+                    raise RuntimeError(f"Cannot load checkpoint: {path}. {error_msg}")
+            else:
+                missing_keys, unexpected_keys = self.load_state_dict(state_dict, strict=False)
+                if len(unexpected_keys) != 0:
+                    raise ValueError(f"Cannot load checkpoint: {path}. {len(unexpected_keys)} keys are unexpected.")
+        finally:
+            del state_dict
+            release_cpu_memory()
+
+        distributed = torch.distributed.is_available() and torch.distributed.is_initialized()
+        if not distributed or torch.distributed.get_rank() == 0:
+            print(f"Loaded checkpoint from {path}. {checkpoint_key_count} keys are available.")

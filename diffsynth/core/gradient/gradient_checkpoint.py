@@ -32,6 +32,7 @@ def gradient_checkpoint_forward(
     use_gradient_checkpointing,
     use_gradient_checkpointing_offload,
     *args,
+    checkpoint_use_reentrant=False,
     **kwargs,
 ):
     if use_gradient_checkpointing and _HAS_DEEPSPEED and deepspeed.checkpointing.is_configured():
@@ -47,12 +48,25 @@ def gradient_checkpoint_forward(
         return model_output
     if use_gradient_checkpointing_offload:
         with torch.autograd.graph.save_on_cpu():
-            model_output = torch.utils.checkpoint.checkpoint(
-                create_custom_forward(model),
-                *args,
-                **kwargs,
-                use_reentrant=False,
-            )
+            if checkpoint_use_reentrant:
+                # Reentrant checkpointing runs the first forward under no_grad,
+                # so save_on_cpu only stores the explicit checkpoint inputs
+                # instead of every tensor saved by operations inside the block.
+                def custom_forward(*inputs):
+                    return model(*inputs, **kwargs)
+
+                model_output = torch.utils.checkpoint.checkpoint(
+                    custom_forward,
+                    *args,
+                    use_reentrant=True,
+                )
+            else:
+                model_output = torch.utils.checkpoint.checkpoint(
+                    create_custom_forward(model),
+                    *args,
+                    **kwargs,
+                    use_reentrant=False,
+                )
     elif use_gradient_checkpointing:
         model_output = torch.utils.checkpoint.checkpoint(
             create_custom_forward(model),

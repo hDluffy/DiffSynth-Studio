@@ -1719,23 +1719,44 @@ def model_fn_wans2v(
         seq_len_x_list = [min(max(0, seq_len_x - seg_idxs[i]), x.shape[1]) for i in range(len(seg_idxs)-1)]
         seq_len_x = seq_len_x_list[sp_rank]
 
-    def create_custom_forward(module):
-        def custom_forward(*inputs):
-            return module(*inputs)
-        return custom_forward
-
     for block_id, block in enumerate(dit.blocks):
-        x = gradient_checkpoint_forward(
-                block,
-                use_gradient_checkpointing,
-                use_gradient_checkpointing_offload,
-                x, context, t_mod, seq_len_x, pre_compute_freqs[0]
+        def block_with_audio(
+            hidden_states,
+            block_context,
+            block_t_mod,
+            block_audio_global,
+            block_audio,
+            current_block=block,
+            current_block_id=block_id,
+        ):
+            # RoPE is detached and shared by every block. Keeping it out of the
+            # explicit reentrant-checkpoint inputs prevents save_on_cpu from
+            # copying the same large complex128 tensor once per block.
+            hidden_states = current_block(
+                hidden_states,
+                block_context,
+                block_t_mod,
+                seq_len_x,
+                pre_compute_freqs[0],
             )
+            return dit.after_transformer_block(
+                current_block_id,
+                hidden_states,
+                block_audio_global,
+                block_audio,
+                seq_len_x,
+            )
+
         x = gradient_checkpoint_forward(
-            lambda x, block_id=block_id: dit.after_transformer_block(block_id, x, audio_emb_global, merged_audio_emb, seq_len_x),
+            block_with_audio,
             use_gradient_checkpointing,
             use_gradient_checkpointing_offload,
-            x
+            x,
+            context,
+            t_mod,
+            audio_emb_global,
+            merged_audio_emb,
+            checkpoint_use_reentrant=use_gradient_checkpointing_offload,
         )
 
     if use_unified_sequence_parallel and dist.is_initialized() and dist.get_world_size() > 1:

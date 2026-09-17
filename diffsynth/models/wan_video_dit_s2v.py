@@ -628,19 +628,46 @@ class WanS2VModel(torch.nn.Module):
         t_mod = self.time_projection(t).unflatten(1, (6, self.dim)).unsqueeze(2).transpose(0, 2)
 
         for block_id, block in enumerate(self.blocks):
+            def block_with_audio(
+                hidden_states,
+                block_context,
+                block_t_mod,
+                block_audio_global,
+                block_audio,
+                current_block=block,
+                current_block_id=block_id,
+            ):
+                # RoPE is detached and has no gradient path. Keep it out of the
+                # explicit inputs because reentrant checkpointing otherwise
+                # saves this large complex128 tensor once per transformer block
+                # when save_on_cpu is enabled. Conditions that require gradients
+                # remain explicit inputs so their shared upstream graph is
+                # traversed exactly once by the outer autograd engine.
+                hidden_states = current_block(
+                    hidden_states,
+                    block_context,
+                    block_t_mod,
+                    seq_len_x,
+                    pre_compute_freqs[0],
+                )
+                return self.after_transformer_block(
+                    current_block_id,
+                    hidden_states,
+                    block_audio_global,
+                    block_audio,
+                    seq_len_x,
+                )
+
             x = gradient_checkpoint_forward(
-                block,
+                block_with_audio,
                 use_gradient_checkpointing,
                 use_gradient_checkpointing_offload,
-                x, context, t_mod, seq_len_x, pre_compute_freqs[0]
-            )
-            x = gradient_checkpoint_forward(
-                lambda x, block_id=block_id: self.after_transformer_block(
-                    block_id, x, audio_emb_global, merged_audio_emb, seq_len_x
-                ),
-                use_gradient_checkpointing,
-                use_gradient_checkpointing_offload,
-                x
+                x,
+                context,
+                t_mod,
+                audio_emb_global,
+                merged_audio_emb,
+                checkpoint_use_reentrant=use_gradient_checkpointing_offload,
             )
 
         x = x[:, :seq_len_x]
