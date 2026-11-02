@@ -55,9 +55,20 @@ def gradient_checkpoint_forward(
                 def custom_forward(*inputs):
                     return model(*inputs, **kwargs)
 
+                checkpoint_args = args
+                if torch.is_grad_enabled() and not judge_args_requires_grad(*args):
+                    # Frozen inputs are common in LoRA training. Reentrant
+                    # checkpointing needs a grad-enabled explicit input to
+                    # retain gradients for trainable parameters inside model.
+                    dummy = torch.ones((), requires_grad=True)
+                    checkpoint_args = (dummy,) + args
+
+                    def custom_forward(_dummy, *inputs):
+                        return model(*inputs, **kwargs)
+
                 model_output = torch.utils.checkpoint.checkpoint(
                     custom_forward,
-                    *args,
+                    *checkpoint_args,
                     use_reentrant=True,
                 )
             else:

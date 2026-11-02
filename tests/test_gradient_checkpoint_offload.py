@@ -15,6 +15,27 @@ class ScaleAndBias(torch.nn.Module):
 
 
 class TestGradientCheckpointOffload(unittest.TestCase):
+    def test_reentrant_offload_preserves_parameter_gradients_with_frozen_inputs(self):
+        model = ScaleAndBias()
+        reference = ScaleAndBias()
+        value = torch.tensor(3.0)
+        bias = torch.tensor(4.0)
+        expected = value
+        actual = value
+        for _ in range(2):
+            expected = reference(expected, bias)
+            actual = gradient_checkpoint_forward(
+                model, True, True, actual, bias, checkpoint_use_reentrant=True,
+            )
+
+        self.assertIsNotNone(actual.grad_fn)
+        torch.testing.assert_close(actual, expected)
+        actual.backward()
+        expected.backward()
+        torch.testing.assert_close(model.scale.grad, reference.scale.grad)
+        self.assertFalse(value.requires_grad)
+        self.assertIsNone(value.grad)
+
     def test_reentrant_offload_preserves_input_and_parameter_gradients(self):
         model = ScaleAndBias()
         value = torch.tensor(3.0, requires_grad=True)
