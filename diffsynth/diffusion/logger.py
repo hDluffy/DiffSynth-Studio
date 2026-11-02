@@ -77,6 +77,20 @@ class ModelLogger:
 
     def on_step_end(self, accelerator: Accelerator, model: torch.nn.Module, save_steps=None, **kwargs):
         self.num_steps += 1
+        metrics = kwargs.get("metrics")
+        if metrics:
+            # All ranks participate, including ranks without a valid face.
+            keys = sorted(metrics)
+            values = torch.stack([
+                torch.as_tensor(metrics[key], device=accelerator.device, dtype=torch.float32).detach().reshape(())
+                for key in keys
+            ])
+            values = accelerator.reduce(values, reduction="mean").cpu().tolist()
+            metrics = dict(zip(keys, values))
+            active = metrics.get("faceid/active", 0.)
+            if active > 0:
+                metrics["faceid/cosine_when_active"] = metrics["faceid/cosine"] / active
+                metrics["loss/faceid_when_active"] = metrics["loss/faceid"] / active
         if accelerator.is_main_process:
             if not self.loggers_initialized:
                 self.init_loggers()
@@ -84,6 +98,10 @@ class ModelLogger:
             if loss is not None:
                 for logger in self.loggers:
                     logger.log("loss", loss, self.num_steps)
+            if metrics:
+                for key, value in metrics.items():
+                    for logger in self.loggers:
+                        logger.log(key, value, self.num_steps)
         if save_steps is not None and self.num_steps % save_steps == 0:
             self.save_model(accelerator, model, f"step-{self.num_steps}.safetensors")
 

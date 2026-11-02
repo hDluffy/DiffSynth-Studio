@@ -1,0 +1,6 @@
+# Install alongside the project's existing PyTorch/Accelerate/DeepSpeed environment.
+insightface>=0.7.3
+onnxruntime>=1.17
+scikit-image>=0.22
+opencv-python-headless>=4.8
+tensorboard>=2.16

@@ -79,6 +79,9 @@ def _sha256_file(path):
 def _cache_config(args, dataset):
     values = vars(args) if args is not None else {}
     config = {key: _json_safe(values.get(key)) for key in _CACHE_CONFIG_KEYS}
+    # Optional extensions supply versioned, content-addressed cache settings.
+    if values.get("faceid_cache_signature") is not None:
+        config["faceid"] = values["faceid_cache_signature"]
     config["metadata_sha256"] = _sha256_file(getattr(dataset, "metadata_path", None))
     payload = json.dumps(config, sort_keys=True, ensure_ascii=False).encode("utf-8")
     return config, hashlib.sha256(payload).hexdigest()
@@ -178,16 +181,26 @@ def launch_training_task(
         _log_memory_snapshot(accelerator, "after_accelerator_prepare")
 
     initialize_deepspeed_gradient_checkpointing(accelerator)
+    training_module = accelerator.unwrap_model(model)
+    if hasattr(training_module, "setup_training_auxiliaries"):
+        training_module.setup_training_auxiliaries(accelerator)
+    completed_optimizer_steps = 0
     first_step = True
     for epoch_id in range(num_epochs):
         for data in tqdm(dataloader):
             if first_step:
                 _log_memory_snapshot(accelerator, "first_step_data_loaded")
             with accelerator.accumulate(model):
+                if hasattr(training_module, "set_optimizer_step"):
+                    training_module.set_optimizer_step(completed_optimizer_steps)
                 if dataset.load_from_cache:
                     loss = model({}, inputs=data)
                 else:
                     loss = model(data)
+                metrics = None
+                if isinstance(loss, dict):
+                    metrics = loss.get("metrics")
+                    loss = loss["loss"]
                 if first_step:
                     _log_memory_snapshot(accelerator, "first_step_after_forward")
                 accelerator.backward(loss)
@@ -200,7 +213,9 @@ def launch_training_task(
                     _log_memory_snapshot(accelerator, "first_step_after_optimizer_step")
                 scheduler.step()
                 optimizer.zero_grad()
-                model_logger.on_step_end(accelerator, model, save_steps, loss=loss)
+                if accelerator.sync_gradients:
+                    completed_optimizer_steps += 1
+                model_logger.on_step_end(accelerator, model, save_steps, loss=loss, metrics=metrics)
             first_step = False
         if save_steps is None:
             model_logger.on_epoch_end(accelerator, model, epoch_id)

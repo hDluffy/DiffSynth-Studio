@@ -319,8 +319,8 @@ def wan_parser():
     return parser
 
 
-if __name__ == "__main__":
-    parser = wan_parser()
+def main(parser=None, training_module_class=WanTrainingModule):
+    parser = wan_parser() if parser is None else parser
     args = parser.parse_args()
     accelerator = accelerate.Accelerator(
         gradient_accumulation_steps=args.gradient_accumulation_steps,
@@ -401,7 +401,7 @@ if __name__ == "__main__":
         post_processor=audio_video_aligner,
         cache_manifest_required=args.require_cache_manifest,
     )
-    model = WanTrainingModule(
+    model = training_module_class(
         model_paths=args.model_paths,
         model_id_with_origin_paths=args.model_id_with_origin_paths,
         tokenizer_path=args.tokenizer_path,
@@ -459,3 +459,7 @@ if __name__ == "__main__":
         "dpo:train": launch_training_task,
     }
     launcher_map[args.task](accelerator, dataset, model, model_logger, args=args)
+
+
+if __name__ == "__main__":
+    main()
