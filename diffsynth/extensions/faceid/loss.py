@@ -4,6 +4,7 @@ import time
 import torch
 from .alignment import align_faces
 from .arcface import identity_embedding
+from .sampling import FaceIDSigmaSampler
 
 
 def cosine_identity_loss(embeddings, reference, quality):
@@ -13,13 +14,12 @@ def cosine_identity_loss(embeddings, reference, quality):
 
 
 def flow_match_faceid_loss(pipe, auxiliary, annotation, config, step, **inputs):
-    minimum = int(inputs.get('min_timestep_boundary', 0) * len(pipe.scheduler.timesteps))
-    maximum = int(inputs.get('max_timestep_boundary', 1) * len(pipe.scheduler.timesteps))
-    index = torch.randint(minimum, maximum, (1,))
-    timestep = pipe.scheduler.timesteps[index].to(dtype=pipe.torch_dtype, device=pipe.device)
-    # Match scheduler lookup (including BF16 timestep rounding), not timestep/1000.
-    sigma_index = torch.argmin((pipe.scheduler.timesteps - timestep.to(pipe.scheduler.timesteps.device)).abs())
-    sigma = pipe.scheduler.sigmas[sigma_index].to(device=pipe.device, dtype=torch.float32)
+    sampler = getattr(pipe, 'faceid_sigma_sampler', None)
+    if sampler is None:
+        sampler = FaceIDSigmaSampler(pipe.scheduler, pipe.torch_dtype, config,
+                                     inputs.get('min_timestep_boundary', 0.),
+                                     inputs.get('max_timestep_boundary', 1.))
+    timestep, sigma, focused = sampler.sample(pipe.device)
     clean = inputs['input_latents']
     if clean.ndim != 5 or clean.shape[:3] != (1, 16, 21) or 'first_frame_latents' not in inputs:
         raise ValueError('FaceID requires 81-frame S2V latents [B,16,21,H,W] with a reference first latent')
@@ -70,6 +70,9 @@ def flow_match_faceid_loss(pipe, auxiliary, annotation, config, step, **inputs):
         'loss/faceid_weighted': (weight * identity).detach(), 'loss/total': total.detach(),
         'faceid/cosine': cosine.detach(), 'faceid/active': float(active),
         'faceid/eligible': float(sigma_valid), 'faceid/weight': weight,
+        'sampling/interval_branch': float(focused),
+        'sampling/in_interval': float(sampler.lower <= sigma.item() <= sampler.upper),
+        'sampling/interval_probability': sampler.interval_probability,
         'faceid/valid_frame_fraction': valid[1:].float().mean().item(),
         'faceid/reference_valid': float(annotation['reference_valid']),
         'faceid/frames_used': frames_used, 'faceid/chunk': chunk_index,

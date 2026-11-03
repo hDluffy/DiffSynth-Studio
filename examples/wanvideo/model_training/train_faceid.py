@@ -12,6 +12,7 @@ from diffsynth.extensions.faceid.arcface import file_sha256, load_arcface
 from diffsynth.extensions.faceid.decoder import FaceIDDecoder
 from diffsynth.extensions.faceid.preprocess import FaceIDAnnotator, CACHE_VERSION
 from diffsynth.extensions.faceid.loss import flow_match_faceid_loss
+from diffsynth.extensions.faceid.sampling import FaceIDSigmaSampler
 
 
 class FaceIDTrainingModule(WanTrainingModule):
@@ -21,6 +22,10 @@ class FaceIDTrainingModule(WanTrainingModule):
             raise ValueError('Extract FaceID caches with the data_process config, not ZeRO-3')
         super().__init__(*args, **kwargs)
         self.faceid_config = faceid_config
+        if self.task == 'sft:train':
+            self.pipe.faceid_sigma_sampler = FaceIDSigmaSampler(
+                self.pipe.scheduler, self.pipe.torch_dtype, faceid_config,
+                self.min_timestep_boundary, self.max_timestep_boundary)
         # Plain containers intentionally keep teacher parameters outside the
         # trainable module, DeepSpeed engine, optimizer and exported checkpoint.
         self.faceid_auxiliary = None
@@ -110,6 +115,14 @@ def build_parser():
     parser.add_argument('--faceid_frames', type=int, default=2, choices=(1, 2))
     parser.add_argument('--faceid_sigma_min', type=float, default=.1)
     parser.add_argument('--faceid_sigma_max', type=float, default=.5)
+    parser.add_argument('--sigma_sampling_mode', choices=('original', 'interval', 'mixed'), default='original',
+                        help='Original index sampling, interval-only, or mixture; changes FM distribution too')
+    parser.add_argument('--sigma_sampling_min', type=float, default=None,
+                        help='Effective sigma lower bound; defaults to faceid_sigma_min')
+    parser.add_argument('--sigma_sampling_max', type=float, default=None,
+                        help='Effective sigma upper bound; defaults to faceid_sigma_max')
+    parser.add_argument('--sigma_sampling_prob', type=float, default=.5,
+                        help='Probability of interval branch in mixed mode; remainder uses original sampling')
     parser.add_argument('--faceid_activation_offload', action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument('--faceid_det_threshold', type=float, default=.6)
     parser.add_argument('--faceid_min_face_size', type=int, default=48)
@@ -130,6 +143,16 @@ def validate_config(parser, args):
         parser.error('Invalid FaceID weight, interval or warmup')
     if not 0 <= args.faceid_sigma_min < args.faceid_sigma_max <= 1:
         parser.error('Require 0 <= faceid_sigma_min < faceid_sigma_max <= 1')
+    if args.sigma_sampling_min is None:
+        args.sigma_sampling_min = args.faceid_sigma_min
+    if args.sigma_sampling_max is None:
+        args.sigma_sampling_max = args.faceid_sigma_max
+    if not 0 <= args.sigma_sampling_min < args.sigma_sampling_max <= 1:
+        parser.error('Require 0 <= sigma_sampling_min < sigma_sampling_max <= 1')
+    if not 0 <= args.sigma_sampling_prob <= 1:
+        parser.error('sigma_sampling_prob must be in [0,1]')
+    if not 0 <= args.min_timestep_boundary < args.max_timestep_boundary <= 1:
+        parser.error('Require 0 <= min_timestep_boundary < max_timestep_boundary <= 1')
     if not 0 < args.faceid_det_threshold < 1 or args.faceid_min_face_size <= 0 or not -1 <= args.faceid_min_similarity <= 1:
         parser.error('Invalid face detection/identity quality thresholds')
     for path in (args.faceid_weights, args.faceid_vae_path):

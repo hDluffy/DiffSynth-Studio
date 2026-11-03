@@ -52,6 +52,10 @@ else
     --faceid_weight "${FACEID_WEIGHT:-0.05}" --faceid_warmup_steps "${FACEID_WARMUP_STEPS:-100}"
     --faceid_every "${FACEID_EVERY:-2}" --faceid_frames "${FACEID_FRAMES:-2}"
     --faceid_sigma_min "${FACEID_SIGMA_MIN:-0.1}" --faceid_sigma_max "${FACEID_SIGMA_MAX:-0.5}"
+    --sigma_sampling_mode "${SIGMA_SAMPLING_MODE:-original}"
+    --sigma_sampling_min "${SIGMA_SAMPLING_MIN:-${FACEID_SIGMA_MIN:-0.1}}"
+    --sigma_sampling_max "${SIGMA_SAMPLING_MAX:-${FACEID_SIGMA_MAX:-0.5}}"
+    --sigma_sampling_prob "${SIGMA_SAMPLING_PROB:-0.5}"
     --output_path "${OUTPUT_PATH:-./models/train/Wan2.2-S2V-14B_faceid_lora}"
     --enable_tensorboard_log
   )
