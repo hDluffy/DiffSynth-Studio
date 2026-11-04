@@ -138,7 +138,7 @@ def main():
     parser.add_argument('--lora-checkpoints',nargs='+',required=True,help='Original training safetensors paths or quoted glob(s)')
     parser.add_argument('--cache-path',help='Override cache directory, e.g. held-out validation cache')
     parser.add_argument('--detector',default=str(ROOT/'faceid_model/det_10g.onnx'))
-    parser.add_argument('--samples',type=int,nargs='+',default=[923,2145],help='Zero-based metadata row IDs')
+    parser.add_argument('--samples',type=int,nargs='+',default=[100,200],help='Zero-based metadata row IDs')
     parser.add_argument('--frames',type=int,nargs='+',default=[2,40,80])
     parser.add_argument('--sigmas',type=float,nargs='+',default=[.15,.3,.45])
     parser.add_argument('--seed',type=int,default=20261103)
