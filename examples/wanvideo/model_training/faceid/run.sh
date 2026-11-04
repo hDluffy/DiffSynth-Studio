@@ -37,7 +37,7 @@ if [[ "$MODE" == cache ]]; then
     --audio_processor_path "${AUDIO_PROCESSOR_PATH:-Wan-AI/Wan2.2-S2V-14B:wav2vec2-large-xlsr-53-english/}"
     --faceid_detector_path "$FACEID_DETECTOR_PATH" --tiled
     --faceid_min_face_size "${FACEID_MIN_FACE_SIZE:-48}"
-    --faceid_min_similarity "${FACEID_MIN_SIMILARITY:-0.2}"
+    --faceid_min_similarity "${FACEID_MIN_SIMILARITY:-0.5}"
     --faceid_det_threshold "${FACEID_DET_THRESHOLD:-0.6}"
     --output_path "$CACHE_PATH"
   )
